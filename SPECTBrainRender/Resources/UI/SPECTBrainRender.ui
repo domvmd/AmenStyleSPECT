@@ -1,0 +1,1347 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>SPECTBrainRender</class>
+ <widget class="qMRMLWidget" name="SPECTBrainRender">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>460</width>
+    <height>1040</height>
+   </rect>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <!-- ================= INPUT ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="inputCollapsibleButton">
+     <property name="text">
+      <string>Input</string>
+     </property>
+     <layout class="QFormLayout" name="inputFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="inputVolumeLabel">
+        <property name="text">
+         <string>SPECT volume:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="qMRMLNodeComboBox" name="inputVolumeSelector">
+        <property name="toolTip">
+         <string>Select your already-loaded, reconstructed SPECT scalar volume.</string>
+        </property>
+        <property name="nodeTypes">
+         <stringlist>
+          <string>vtkMRMLScalarVolumeNode</string>
+         </stringlist>
+        </property>
+        <property name="addEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="removeEnabled">
+         <bool>false</bool>
+        </property>
+        <property name="noneEnabled">
+         <bool>true</bool>
+        </property>
+        <property name="showChildNodeTypes">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0" colspan="2">
+       <widget class="QPushButton" name="loadDicomButton">
+        <property name="text">
+         <string>Load DICOM... (secondary path)</string>
+        </property>
+        <property name="toolTip">
+         <string>Import a SPECT DICOM folder with NM multiframe validation/repair. Later stage.</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= ORIENTATION ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="orientationCollapsibleButton">
+     <property name="text">
+      <string>Orientation (confirm before reading laterality)</string>
+     </property>
+     <layout class="QVBoxLayout" name="orientationLayout">
+      <item>
+       <widget class="QLabel" name="orientationNoteLabel">
+        <property name="text">
+         <string>SPECT has no intrinsic left/right landmark. Verify the patient's LEFT, flip if needed, then tick "Orientation confirmed".</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">color: #a05000;</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="flipLayout">
+        <item>
+         <widget class="QCheckBox" name="flipLRCheckBox">
+          <property name="text">
+           <string>Flip L/R</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="flipAPCheckBox">
+          <property name="text">
+           <string>Flip A/P</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="flipSICheckBox">
+          <property name="text">
+           <string>Flip S/I</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="orientationConfirmLayout">
+        <item>
+         <widget class="QPushButton" name="showOrientationButton">
+          <property name="text">
+           <string>Show mid-axial slice</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="orientationConfirmedCheckBox">
+          <property name="text">
+           <string>Orientation confirmed</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= REFERENCE (100%) ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="referenceCollapsibleButton">
+     <property name="text">
+      <string>Reference (the 100% anchor)</string>
+     </property>
+     <layout class="QVBoxLayout" name="referenceLayout">
+      <item>
+       <layout class="QFormLayout" name="referenceFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="referenceModeLabel">
+          <property name="text">
+           <string>Reference mode:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="referenceModeComboBox">
+          <property name="toolTip">
+           <string>Cerebellar max is the Amen default 100% anchor for all thresholds.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="cerebellumRoiLabel">
+          <property name="text">
+           <string>Cerebellum ROI:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="qMRMLNodeComboBox" name="cerebellumRoiSelector">
+          <property name="nodeTypes">
+           <stringlist>
+            <string>vtkMRMLMarkupsROINode</string>
+           </stringlist>
+          </property>
+          <property name="addEnabled">
+           <bool>false</bool>
+          </property>
+          <property name="removeEnabled">
+           <bool>true</bool>
+          </property>
+          <property name="noneEnabled">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="roiButtonLayout">
+        <item>
+         <widget class="QPushButton" name="createRoiButton">
+          <property name="text">
+           <string>Create cerebellum ROI</string>
+          </property>
+          <property name="toolTip">
+           <string>Drop a Box ROI over the posterior fossa, then drag it to cover the cerebellum.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="findCerebellarMaxButton">
+          <property name="text">
+           <string>Find cerebellar max</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="candidateLayout">
+        <item>
+         <widget class="QLabel" name="candidateLabel">
+          <property name="text">
+           <string>Candidate #:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSpinBox" name="candidateRankSpinBox">
+          <property name="minimum">
+           <number>1</number>
+          </property>
+          <property name="maximum">
+           <number>10</number>
+          </property>
+          <property name="value">
+           <number>1</number>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="jumpToCandidateButton">
+          <property name="text">
+           <string>Jump to #</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="acceptCandidateButton">
+          <property name="text">
+           <string>Accept # as 100%</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="manualRefLayout">
+        <item>
+         <widget class="QLabel" name="manualReferenceLabel">
+          <property name="text">
+           <string>Manual reference (counts):</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QDoubleSpinBox" name="manualReferenceSpinBox">
+          <property name="decimals">
+           <number>1</number>
+          </property>
+          <property name="minimum">
+           <double>0.0</double>
+          </property>
+          <property name="maximum">
+           <double>1000000.0</double>
+          </property>
+          <property name="singleStep">
+           <double>10.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Type the Maximum Cerebellar Count directly if you already know it.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="reticleRoiLayout">
+        <item>
+         <widget class="QCheckBox" name="showReticleCheckBox">
+          <property name="text">
+           <string>Show candidate crosshair</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="showRoiCheckBox">
+          <property name="text">
+           <string>Show ROI box</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="referenceValueLabel">
+        <property name="text">
+         <string>Reference (100%): (no volume)</string>
+        </property>
+        <property name="styleSheet">
+         <string notr="true">font-weight: bold;</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= PREPROCESS ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="preprocessCollapsibleButton">
+     <property name="text">
+      <string>Preprocess / brain mask</string>
+     </property>
+     <layout class="QFormLayout" name="preprocessFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="brainMaskLabel">
+        <property name="text">
+         <string>Brain mask (largest island):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QCheckBox" name="brainMaskCheckBox">
+        <property name="text">
+         <string>drop scalp / sinus / salivary uptake</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="islandThresholdLabel">
+        <property name="text">
+         <string>Island threshold (% of ref):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="islandThresholdSpinBox">
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="minimum">
+         <double>5.0</double>
+        </property>
+        <property name="maximum">
+         <double>60.0</double>
+        </property>
+        <property name="singleStep">
+         <double>1.0</double>
+        </property>
+        <property name="value">
+         <double>30.0</double>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="islandErodeLabel">
+        <property name="text">
+         <string>Island erode (voxels):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QSpinBox" name="islandErodeSpinBox">
+        <property name="minimum">
+         <number>0</number>
+        </property>
+        <property name="maximum">
+         <number>5</number>
+        </property>
+        <property name="value">
+         <number>2</number>
+        </property>
+        <property name="toolTip">
+         <string>Morphological opening to snap thin bridges so extracranial uptake is dropped (0 = off).</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="robustPercentileLabel">
+        <property name="text">
+         <string>Robust max percentile:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QDoubleSpinBox" name="robustPercentileSpinBox">
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="minimum">
+         <double>90.0</double>
+        </property>
+        <property name="maximum">
+         <double>100.0</double>
+        </property>
+        <property name="singleStep">
+         <double>0.5</double>
+        </property>
+        <property name="value">
+         <double>99.5</double>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= SURFACE ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="surfaceCollapsibleButton">
+     <property name="text">
+      <string>Surface scan (hypoperfusion = dents / holes)</string>
+     </property>
+     <layout class="QVBoxLayout" name="surfaceLayout">
+      <item>
+       <layout class="QHBoxLayout" name="surfaceTechniqueLayout">
+        <item>
+         <widget class="QLabel" name="surfaceTechniqueLabel">
+          <property name="text">
+           <string>Surface technique:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QComboBox" name="surfaceTechniqueComboBox">
+          <property name="toolTip">
+           <string>Isosurface mesh (marching cubes) builds a solid shaded brain surface at the threshold - low perfusion falls inward as crisp dents (recommended, closest to the Amen look). Volume render is the GPU ray-cast for comparison.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QLabel" name="surfaceThresholdLabel">
+        <property name="text">
+         <string>Surface threshold (% of reference). Tissue below threshold falls inward as holes / dents (a hole = low perfusion, NOT zero).</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="ctkSliderWidget" name="surfaceThresholdSlider">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="minimum">
+         <double>20.0</double>
+        </property>
+        <property name="maximum">
+         <double>95.0</double>
+        </property>
+        <property name="singleStep">
+         <double>1.0</double>
+        </property>
+        <property name="value">
+         <double>55.0</double>
+        </property>
+        <property name="suffix">
+         <string> %</string>
+        </property>
+        <property name="tracking">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="surfaceOpacityLabel">
+        <property name="text">
+         <string>Surface opacity (higher = more solid):</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="ctkSliderWidget" name="surfaceOpacitySlider">
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.10</double>
+        </property>
+        <property name="maximum">
+         <double>1.00</double>
+        </property>
+        <property name="singleStep">
+         <double>0.05</double>
+        </property>
+        <property name="value">
+         <double>1.00</double>
+        </property>
+        <property name="tracking">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="surfaceSmoothnessLabel">
+        <property name="text">
+         <string>Surface smoothness (sigma; lower = more detail):</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="ctkSliderWidget" name="surfaceSmoothnessSlider">
+        <property name="decimals">
+         <number>1</number>
+        </property>
+        <property name="minimum">
+         <double>0.0</double>
+        </property>
+        <property name="maximum">
+         <double>3.0</double>
+        </property>
+        <property name="singleStep">
+         <double>0.1</double>
+        </property>
+        <property name="value">
+         <double>0.3</double>
+        </property>
+        <property name="tracking">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="surfaceColorLayout">
+        <item>
+         <widget class="QLabel" name="surfaceColorLabel">
+          <property name="text">
+           <string>Surface colors:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QComboBox" name="surfaceColorSchemeComboBox">
+          <property name="toolTip">
+           <string>Amen spectrum: a positional rainbow (pink superior -&gt; violet inferior) like the real Amen surface, with lighting carrying the shape. Solid sculpt: one matte tissue tone. Hole-emphasis / Perfusion rainbow: tint the surface by underlying uptake. Color applies to either technique.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="keepPresetOpacityCheckBox">
+        <property name="text">
+         <string>Keep soft preset opacity (no hard defect threshold)</string>
+        </property>
+        <property name="checked">
+         <bool>false</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="surfaceButtonLayout">
+        <item>
+         <widget class="QPushButton" name="prognostic45Button">
+          <property name="text">
+           <string>Drop to 45% (prognostic)</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="generateSurfaceButton">
+          <property name="text">
+           <string>Generate Surface</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= ACTIVE ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="activeCollapsibleButton">
+     <property name="text">
+      <string>Active scan (hyperperfusion = red / white)</string>
+     </property>
+     <layout class="QFormLayout" name="activeFormLayout">
+      <item row="0" column="0">
+       <widget class="QLabel" name="activePctLabel">
+        <property name="text">
+         <string>Active threshold / red (% of ref):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="activePctSpinBox">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="minimum">
+         <double>50.0</double>
+        </property>
+        <property name="maximum">
+         <double>100.0</double>
+        </property>
+        <property name="singleStep">
+         <double>1.0</double>
+        </property>
+        <property name="value">
+         <double>85.0</double>
+        </property>
+        <property name="toolTip">
+         <string>Tissue at or above this % of cerebellar max is volume-rendered opaque RED, ramping to WHITE at the white point.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="activeWhitePctLabel">
+        <property name="text">
+         <string>White point (% of ref):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QDoubleSpinBox" name="activeWhitePctSpinBox">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="minimum">
+         <double>50.0</double>
+        </property>
+        <property name="maximum">
+         <double>150.0</double>
+        </property>
+        <property name="singleStep">
+         <double>1.0</double>
+        </property>
+        <property name="value">
+         <double>92.0</double>
+        </property>
+        <property name="toolTip">
+         <string>Tissue at or above this % of cerebellar max renders WHITE (cerebellum = 100% ceiling).</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="0">
+       <widget class="QLabel" name="meshPctLabel">
+        <property name="text">
+         <string>Wire mesh envelope (% of ref):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="2" column="1">
+       <widget class="QDoubleSpinBox" name="meshPctSpinBox">
+        <property name="decimals">
+         <number>0</number>
+        </property>
+        <property name="minimum">
+         <double>5.0</double>
+        </property>
+        <property name="maximum">
+         <double>40.0</double>
+        </property>
+        <property name="singleStep">
+         <double>1.0</double>
+        </property>
+        <property name="value">
+         <double>20.0</double>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="0">
+       <widget class="QLabel" name="nodeRadiusLabel">
+        <property name="text">
+         <string>Node radius (mm):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="3" column="1">
+       <widget class="QDoubleSpinBox" name="nodeRadiusSpinBox">
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.0</double>
+        </property>
+        <property name="maximum">
+         <double>3.0</double>
+        </property>
+        <property name="singleStep">
+         <double>0.25</double>
+        </property>
+        <property name="value">
+         <double>0.0</double>
+        </property>
+        <property name="toolTip">
+         <string>Radius of the sphere "nodes" at each wire vertex. 0 = bare wireframe (no nodes).</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="0">
+       <widget class="QLabel" name="decimateLabel">
+        <property name="text">
+         <string>Mesh decimate (0-1):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="4" column="1">
+       <widget class="QDoubleSpinBox" name="decimateSpinBox">
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.0</double>
+        </property>
+        <property name="maximum">
+         <double>0.95</double>
+        </property>
+        <property name="singleStep">
+         <double>0.05</double>
+        </property>
+        <property name="value">
+         <double>0.40</double>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="0">
+       <widget class="QLabel" name="wireOpacityLabel">
+        <property name="text">
+         <string>Wire opacity (0-1):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="5" column="1">
+       <widget class="QDoubleSpinBox" name="wireOpacitySpinBox">
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.1</double>
+        </property>
+        <property name="maximum">
+         <double>1.0</double>
+        </property>
+        <property name="singleStep">
+         <double>0.05</double>
+        </property>
+        <property name="value">
+         <double>0.45</double>
+        </property>
+       </widget>
+      </item>
+      <item row="6" column="0" colspan="2">
+       <widget class="QPushButton" name="generateActiveButton">
+        <property name="text">
+         <string>Generate Active</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= VIEWS / EXPORT ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="viewsCollapsibleButton">
+     <property name="text">
+      <string>Views / export</string>
+     </property>
+     <layout class="QVBoxLayout" name="viewsLayout">
+      <item>
+       <widget class="QLabel" name="viewsNoteLabel">
+        <property name="text">
+         <string>Snap the 3D camera to a standard orientation, or export a 6-view montage (L, R, A, P, superior, inferior) of the current surface or active scan.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QGridLayout" name="snapGrid">
+        <item row="0" column="0">
+         <widget class="QPushButton" name="viewSuperiorButton">
+          <property name="text">
+           <string>Superior</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QPushButton" name="viewInferiorButton">
+          <property name="text">
+           <string>Inferior (underside)</string>
+          </property>
+          <property name="toolTip">
+           <string>The underside view - critical for the temporal lobes.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="2">
+         <widget class="QPushButton" name="viewAnteriorButton">
+          <property name="text">
+           <string>Anterior</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QPushButton" name="viewPosteriorButton">
+          <property name="text">
+           <string>Posterior</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QPushButton" name="viewLeftButton">
+          <property name="text">
+           <string>Left</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="2">
+         <widget class="QPushButton" name="viewRightButton">
+          <property name="text">
+           <string>Right</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="outputDirLayout">
+        <item>
+         <widget class="QLabel" name="outputDirLabel">
+          <property name="text">
+           <string>Output folder:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="ctkDirectoryButton" name="outputDirButton"/>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="exportLayout">
+        <item>
+         <widget class="QPushButton" name="exportSurfaceButton">
+          <property name="text">
+           <string>Export Surface 6-view PNG</string>
+          </property>
+          <property name="toolTip">
+           <string>Regenerate the surface scan and save 6 view PNGs + montage.png to &lt;output folder&gt;/surface_views/.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="exportActiveButton">
+          <property name="text">
+           <string>Export Active 6-view PNG</string>
+          </property>
+          <property name="toolTip">
+           <string>Regenerate the active scan and save 6 view PNGs + montage.png to &lt;output folder&gt;/active_views/.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= REGIONAL QUANTIFICATION ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="regionsCollapsibleButton">
+     <property name="text">
+      <string>Regional quantification (hypo / hyper vs cerebellar max)</string>
+     </property>
+     <layout class="QVBoxLayout" name="regionsLayout">
+      <item>
+       <widget class="QLabel" name="regionsNoteLabel">
+        <property name="text">
+         <string>One named Box ROI per region; each region's uptake is read as a % of the cerebellar reference and classified hypo (&lt;60%) / normal / hyper (&gt;80%). "Create 53-region scaffold" drops approximate boxes you then drag onto each structure - confirm orientation first.</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QFormLayout" name="regionsFormLayout">
+        <item row="0" column="0">
+         <widget class="QLabel" name="regionMetricLabel">
+          <property name="text">
+           <string>Region metric:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="1">
+         <widget class="QComboBox" name="regionMetricComboBox">
+          <property name="toolTip">
+           <string>Mean = region average uptake; Peak = region's hottest voxel.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0">
+         <widget class="QLabel" name="regionRefModeLabel">
+          <property name="text">
+           <string>Reference (denominator):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="1">
+         <widget class="QComboBox" name="regionRefModeComboBox">
+          <property name="toolTip">
+           <string>% of cerebellar MAX uses the accepted Maximum Cerebellar Count. % of cerebellar-region MEAN uses the mean inside the cerebellum ROI.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="0">
+         <widget class="QLabel" name="hypoPctLabel">
+          <property name="text">
+           <string>Hypoactive below (% of ref):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="2" column="1">
+         <widget class="QDoubleSpinBox" name="hypoPctSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>10.0</double>
+          </property>
+          <property name="maximum">
+           <double>100.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>55.0</double>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="0">
+         <widget class="QLabel" name="hyperPctLabel">
+          <property name="text">
+           <string>Hyperactive above (% of ref):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QDoubleSpinBox" name="hyperPctSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>50.0</double>
+          </property>
+          <property name="maximum">
+           <double>200.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>85.0</double>
+          </property>
+         </widget>
+        </item>
+        <item row="4" column="0">
+         <widget class="QLabel" name="regionFloorLabel">
+          <property name="text">
+           <string>Tissue floor (% of cereb. max):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="4" column="1">
+         <widget class="QDoubleSpinBox" name="regionFloorSpinBox">
+          <property name="decimals">
+           <number>1</number>
+          </property>
+          <property name="minimum">
+           <double>0.0</double>
+          </property>
+          <property name="maximum">
+           <double>30.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>5.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Voxels below this % of the cerebellar max are treated as CSF/background and excluded from the region mean.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="5" column="0">
+         <widget class="QLabel" name="asymmetryPctLabel">
+          <property name="text">
+           <string>Flag L/R asymmetry above (%):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="5" column="1">
+         <widget class="QDoubleSpinBox" name="asymmetryPctSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>0.0</double>
+          </property>
+          <property name="maximum">
+           <double>100.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>15.0</double>
+          </property>
+         </widget>
+        </item>
+        <item row="6" column="0">
+         <widget class="QLabel" name="focalHyperLabel">
+          <property name="text">
+           <string>Focal hyperactivity:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="6" column="1">
+         <widget class="QCheckBox" name="focalHyperCheckBox">
+          <property name="text">
+           <string>flag from hot voxels, not the mean</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>A region is hyperactive if a focal cluster of its voxels exceeds the hyper %, even when the surrounding tissue drags the ROI mean down to "normal". Mirrors masking at the hyper threshold and averaging inside the mask.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="7" column="0">
+         <widget class="QLabel" name="minHotVoxelsLabel">
+          <property name="text">
+           <string>Focal: min hot voxels:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="7" column="1">
+         <widget class="QSpinBox" name="minHotVoxelsSpinBox">
+          <property name="minimum">
+           <number>1</number>
+          </property>
+          <property name="maximum">
+           <number>100000</number>
+          </property>
+          <property name="singleStep">
+           <number>1</number>
+          </property>
+          <property name="value">
+           <number>3</number>
+          </property>
+          <property name="toolTip">
+           <string>Hyperactive if the ROI holds at least this many hot voxels (>= hyper %). This is the intuitive dial - the "Hot %" column shows each region's hot-voxel count in parentheses. Raise it if noise over-flags; lower it (min 1) for the smallest foci.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="8" column="0">
+         <widget class="QLabel" name="minHotFracLabel">
+          <property name="text">
+           <string>Focal: or min hot fraction (%):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="8" column="1">
+         <widget class="QDoubleSpinBox" name="minHotFracSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>1.0</double>
+          </property>
+          <property name="maximum">
+           <double>100.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>10.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Alternative trigger: hyperactive if at least this % of the ROI is hot. OR'd with the hot-voxel count, so either one flags the region.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="9" column="0">
+         <widget class="QLabel" name="hyperWhiteLabel">
+          <property name="text">
+           <string>Grade +2 / white at (% of max):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="9" column="1">
+         <widget class="QDoubleSpinBox" name="hyperWhiteSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>50.0</double>
+          </property>
+          <property name="maximum">
+           <double>150.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>92.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Hyperactive grade: +1 = hot-voxel mean from the hyper threshold up to here (red); +2 = here to the 100% ceiling (white); +3 = ceiling to the +4 cut; +4 = at/above it.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="10" column="0">
+         <widget class="QLabel" name="hyperTopLabel">
+          <property name="text">
+           <string>Grade +4 at (% of max):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="10" column="1">
+         <widget class="QDoubleSpinBox" name="hyperTopSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>100.0</double>
+          </property>
+          <property name="maximum">
+           <double>400.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>110.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Hyperactive regions whose hot-voxel mean reaches this % of cerebellar max are graded +4 (the most severe).</string>
+          </property>
+         </widget>
+        </item>
+        <item row="11" column="0">
+         <widget class="QLabel" name="hypoStepLabel">
+          <property name="text">
+           <string>Hypo grade step (% of max):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="11" column="1">
+         <widget class="QDoubleSpinBox" name="hypoStepSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>2.0</double>
+          </property>
+          <property name="maximum">
+           <double>30.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>10.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Hypoactive grade deepens by one level (-1 -> -2 -> -3 -> -4) for each step of this many % below the hypoactive threshold.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QCheckBox" name="colorRoiByClassCheckBox">
+        <property name="text">
+         <string>Tint ROI boxes by class (hypo=blue, normal=green, hyper=red)</string>
+        </property>
+        <property name="checked">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="regionSelectLabel">
+        <property name="text">
+         <string>Regions to include (tick a lobe or expand it for individual regions):</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QTreeWidget" name="regionSelectTreeWidget">
+        <property name="minimumHeight" stdset="0">
+         <number>170</number>
+        </property>
+        <property name="headerHidden">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="regionSelectButtonLayout">
+        <item>
+         <widget class="QPushButton" name="selectAllRegionsButton">
+          <property name="text">
+           <string>Select all</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="selectNoneRegionsButton">
+          <property name="text">
+           <string>Select none</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="removeUncheckedCheckBox">
+          <property name="text">
+           <string>Remove unchecked region ROIs</string>
+          </property>
+          <property name="toolTip">
+           <string>When creating, also delete any region ROIs (from this taxonomy) that are NOT ticked, so the scene holds exactly your selection. Off = only add/update the ticked ones.</string>
+          </property>
+          <property name="checked">
+           <bool>false</bool>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="regionButtonLayout">
+        <item>
+         <widget class="QPushButton" name="createRegionScaffoldButton">
+          <property name="text">
+           <string>Create selected region ROIs</string>
+          </property>
+          <property name="toolTip">
+           <string>Drop one approximately-placed, named Box ROI for each TICKED region under an "Amen Regions" folder. Drag each onto the true structure before quantifying.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="quantifyRegionsButton">
+          <property name="text">
+           <string>Quantify regions</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QPushButton" name="exportRegionTsvButton">
+        <property name="text">
+         <string>Export regional table (TSV)</string>
+        </property>
+        <property name="toolTip">
+         <string>Write regional_all.tsv and regional_hypo_hyper.tsv to the Views/export output folder.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QTableWidget" name="regionTableWidget">
+        <property name="minimumHeight" stdset="0">
+         <number>220</number>
+        </property>
+        <property name="selectionBehavior">
+         <enum>QAbstractItemView::SelectRows</enum>
+        </property>
+        <property name="editTriggers">
+         <set>QAbstractItemView::NoEditTriggers</set>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <!-- ================= STATUS / LOG ================= -->
+   <item>
+    <widget class="ctkCollapsibleButton" name="statusCollapsibleButton">
+     <property name="text">
+      <string>Status / calibration log</string>
+     </property>
+     <layout class="QVBoxLayout" name="statusLayout">
+      <item>
+       <widget class="QPlainTextEdit" name="statusTextEdit">
+        <property name="readOnly">
+         <bool>true</bool>
+        </property>
+        <property name="minimumHeight" stdset="0">
+         <number>180</number>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>ctkCollapsibleButton</class>
+   <extends>QWidget</extends>
+   <header>ctkCollapsibleButton.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkDirectoryButton</class>
+   <extends>QWidget</extends>
+   <header>ctkDirectoryButton.h</header>
+  </customwidget>
+  <customwidget>
+   <class>ctkSliderWidget</class>
+   <extends>QWidget</extends>
+   <header>ctkSliderWidget.h</header>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLNodeComboBox</class>
+   <extends>QWidget</extends>
+   <header>qMRMLNodeComboBox.h</header>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLWidget</class>
+   <extends>QWidget</extends>
+   <header>qMRMLWidget.h</header>
+   <container>1</container>
+  </customwidget>
+ </customwidgets>
+ <resources/>
+ <connections/>
+</ui>
