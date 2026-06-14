@@ -260,6 +260,21 @@ CEREB_ATLAS_LABELS = frozenset(range(95, 121))  # AAL3 cerebellum lobules + verm
 ATLAS_LUT_PATH = os.path.join(os.path.dirname(__file__), "Resources", "AAL3v1.nii.txt")
 ATLAS_IN_PATIENT_NAME = "AAL3 (in patient)"  # the warped atlas labelmap from registerAtlasToVolume
 
+# #3 landmark re-align: (name, template RAS) pairs - derived from the bundled
+# template/atlas brain extremes (poles/vertex/temporal) + AAL3 cerebellum centroid.
+# The clinician places the SAME named points on the patient; a transform is fit
+# from the pairs and the atlas re-warped. Template points are fixed, so only the
+# patient side needs placing.
+LANDMARK_NODE_NAME = "Patient landmarks"
+TEMPLATE_LANDMARKS = [
+    ("Frontal pole", (1.5, 74.0, 2.8)),
+    ("Occipital pole", (-13.3, -105.9, 4.8)),
+    ("Vertex", (3.3, -24.9, 88.0)),
+    ("Cerebellum", (2.0, -60.6, -34.7)),
+    ("L temporal", (-77.0, -13.9, -14.4)),
+    ("R temporal", (76.0, -11.3, -14.7)),
+]
+
 ATLAS_STEM_TO_AMEN = {
     "Precentral": "Posterior Frontal", "Rolandic_Oper": "Posterior Frontal",
     "Supp_Motor_Area": "Posterior Frontal", "Paracentral_Lobule": "Posterior Frontal",
@@ -476,6 +491,8 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.quantifyRegionsButton.connect("clicked(bool)", self.onQuantifyRegions)
         self.ui.exportRegionTsvButton.connect("clicked(bool)", self.onExportRegionTsv)
         self.ui.registerAtlasButton.connect("clicked(bool)", self.onRegisterAtlas)
+        self.ui.placeLandmarksButton.connect("clicked(bool)", self.onPlacePatientLandmarks)
+        self.ui.landmarkRealignButton.connect("clicked(bool)", self.onLandmarkRealign)
         self.ui.setReferenceFromAtlasButton.connect("clicked(bool)", self.onSetReferenceFromAtlas)
         self.ui.seedRegionsFromAtlasButton.connect("clicked(bool)", self.onSeedRegionsFromAtlas)
         self.ui.quantifyFromAtlasButton.connect("clicked(bool)", self.onQuantifyFromAtlas)
@@ -508,7 +525,8 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.exportSurfaceButton, self.ui.exportActiveButton,
             self.ui.createRegionScaffoldButton, self.ui.quantifyRegionsButton,
             self.ui.exportRegionTsvButton,
-            self.ui.registerAtlasButton,
+            self.ui.registerAtlasButton, self.ui.placeLandmarksButton,
+            self.ui.landmarkRealignButton,
             self.ui.setReferenceFromAtlasButton, self.ui.seedRegionsFromAtlasButton,
             self.ui.quantifyFromAtlasButton,
         ):
@@ -1026,6 +1044,70 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         else:
             msg += (" FAIL [%s]: registration unreliable for this case - fall back to the manual "
                     "workflow (place the cerebellum 'R' box + 'Create selected region ROIs')." % flags)
+        self.log(msg, replace=True)
+
+    def onPlacePatientLandmarks(self):
+        # #3: drop the named landmark fiducials for the clinician to drag.
+        node = self.currentVolumeNode()
+        if node is None:
+            self.log("Select a SPECT volume first.")
+            return
+        lm = self.logic.createPatientLandmarkScaffold(node)
+        try:
+            slicer.modules.markups.logic().JumpSlicesToNthPointInMarkup(lm.GetID(), 0, True)
+        except Exception:
+            pass
+        self.log("Dropped %d landmark points (%s) at APPROXIMATE positions under '%s'. "
+                 "Drag each onto its TRUE location in the slice views, then "
+                 "'Re-align atlas from landmarks'." % (
+                     lm.GetNumberOfControlPoints(),
+                     ", ".join(n for n, _ in TEMPLATE_LANDMARKS), LANDMARK_NODE_NAME))
+
+    def onLandmarkRealign(self):
+        # #3: fit a transform from the placed landmarks and re-warp the atlas.
+        node = self.currentVolumeNode()
+        if node is None:
+            self.log("Select a SPECT volume first.")
+            return
+        lm = slicer.mrmlScene.GetFirstNodeByName(LANDMARK_NODE_NAME)
+        if lm is None or not lm.IsA("vtkMRMLMarkupsFiducialNode"):
+            self.log("No patient landmarks yet - click 'Place patient landmarks' first.")
+            return
+        if not self.ui.orientationConfirmedCheckBox.checked:
+            self.log("WARNING: orientation not confirmed - confirm L/R before reading laterality.")
+        self.log("Re-aligning the atlas from %d landmarks ..." % lm.GetNumberOfControlPoints())
+        slicer.app.processEvents()
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            warpedAtlas, qc, rms = self.logic.landmarkRealignAtlas(node, lm)
+        except Exception as exc:
+            self.log("Landmark re-align failed: %s" % exc)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self.ui.atlasLabelmapSelector.setCurrentNode(warpedAtlas)
+        refNote = ""
+        try:
+            ref = self.logic.cerebellarMaxFromAtlas(node, warpedAtlas)
+            if ref > 0:
+                self.cerebellarMax = float(ref)
+                self._updatingFromCode = True
+                self.ui.manualReferenceSpinBox.value = self.cerebellarMax
+                self._updatingFromCode = False
+                self.refreshReferenceLabel()
+                refNote = " Reference auto-set to %.0f (verify/override)." % self.cerebellarMax
+        except Exception:
+            pass
+        flags = ",".join(qc["flags"]) if qc["flags"] else "-"
+        msg = ("Landmark re-align: QC %s [containment %.0f%%, cerebellum/brain %.2f, "
+               "NCC %.2f, cerebMax %.0f], landmark RMS %.1f mm.%s" % (
+                   qc["verdict"], qc["containment"], qc["cerebRatio"], qc["ncc"],
+                   qc["cerebMax"], rms, refNote))
+        if qc["verdict"] == "PASS":
+            msg += " Improved - now 'Quantify from atlas (exact masks)'."
+        else:
+            msg += (" Still %s [%s]: refine the landmark positions and re-align, or fall "
+                    "back to the manual ROI workflow." % (qc["verdict"], flags))
         self.log(msg, replace=True)
 
     def onSetReferenceFromAtlas(self):
@@ -2142,6 +2224,106 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             for n in cleanup:
                 slicer.mrmlScene.RemoveNode(n)
         return warpedAtlas, qc
+
+    def createPatientLandmarkScaffold(self, volumeNode):
+        """#3: drop the named landmark fiducials at APPROXIMATE patient positions
+        (anatomical fractions of the brain bbox) for the clinician to drag onto the
+        true points. Reuses/clears the LANDMARK_NODE_NAME node. Returns it."""
+        b = self.brainBounds(volumeNode)  # [xmin,xmax,ymin,ymax,zmin,zmax] RAS
+        xmid, ymid, zmid = (b[0] + b[1]) / 2, (b[2] + b[3]) / 2, (b[4] + b[5]) / 2
+        xr, yr, zr = b[1] - b[0], b[3] - b[2], b[5] - b[4]
+        pos = {
+            "Frontal pole": (xmid, b[3] - 0.05 * yr, zmid),
+            "Occipital pole": (xmid, b[2] + 0.05 * yr, zmid),
+            "Vertex": (xmid, ymid, b[5] - 0.05 * zr),
+            "Cerebellum": (xmid, b[2] + 0.18 * yr, b[4] + 0.12 * zr),
+            "L temporal": (b[0] + 0.08 * xr, ymid, b[4] + 0.30 * zr),
+            "R temporal": (b[1] - 0.08 * xr, ymid, b[4] + 0.30 * zr),
+        }
+        node = slicer.mrmlScene.GetFirstNodeByName(LANDMARK_NODE_NAME)
+        if node and node.IsA("vtkMRMLMarkupsFiducialNode"):
+            node.RemoveAllControlPoints()
+        else:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", LANDMARK_NODE_NAME)
+        for name, _ in TEMPLATE_LANDMARKS:
+            p = pos[name]
+            node.AddControlPoint(float(p[0]), float(p[1]), float(p[2]), name)
+        return node
+
+    def landmarkRealignAtlas(self, volumeNode, patientLandmarksNode, transformType="Affine"):
+        """#3: rescue a failed registration with a few corresponding landmarks. Fits
+        an affine from the landmarks (Fiducial Registration: patient=fixed,
+        template=moving) and uses it to INITIALISE BRAINSFit (Rigid+Affine+BSpline),
+        which then refines on image intensity. A pure 6-point affine is too coarse
+        to be the final transform (NCC ~0.5 even on a good brain), so the landmarks
+        pull the atlas into the right ballpark - escaping the bad auto-initialisation
+        that failed - and BRAINSFit does the precise fit. Returns
+        (warpedAtlasLabelmap, qc, landmarkRmsMillimetres)."""
+        n = patientLandmarksNode.GetNumberOfControlPoints()
+        if n != len(TEMPLATE_LANDMARKS):
+            raise RuntimeError("Need exactly %d patient landmarks (have %d). Use "
+                               "'Place patient landmarks' first." % (len(TEMPLATE_LANDMARKS), n))
+        base = os.path.join(os.path.dirname(__file__), "Resources", "Atlas")
+        tmplLm = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "TemplateLandmarks")
+        for name, ras in TEMPLATE_LANDMARKS:
+            tmplLm.AddControlPoint(ras[0], ras[1], ras[2], name)
+        atlasMni = slicer.util.loadVolume(os.path.join(base, "AAL3v1.nii"))
+        tmpl = slicer.util.loadVolume(os.path.join(base, "SPECT_HMPAO_template.nii.gz"))
+        xf = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", "LandmarkXf")
+        bsp = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLBSplineTransformNode", "LandmarkReg")
+        tmplCoarse = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "TmplCoarse")
+        atlasCoarse = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "AtlasCoarse")
+        old = slicer.mrmlScene.GetFirstNodeByName(ATLAS_IN_PATIENT_NAME)
+        if old:
+            slicer.mrmlScene.RemoveNode(old)
+        warpedAtlas = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", ATLAS_IN_PATIENT_NAME)
+        warpedTmpl = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "AtlasTemplateInPatient")
+        cleanup = [tmplLm, atlasMni, tmpl, warpedTmpl, xf, bsp, tmplCoarse, atlasCoarse]
+
+        def resample(inVol, outVol, warp, interp, ptype):
+            cli = slicer.cli.runSync(slicer.modules.brainsresample, None, {
+                "inputVolume": inVol.GetID(), "referenceVolume": volumeNode.GetID(),
+                "outputVolume": outVol.GetID(), "warpTransform": warp.GetID(),
+                "interpolationMode": interp, "pixelType": ptype})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSResample failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+        try:
+            # 1. fit the landmark affine (used only as a warpTransform = proven direction)
+            cli = slicer.cli.runSync(slicer.modules.fiducialregistration, None, {
+                "fixedLandmarks": patientLandmarksNode.GetID(),
+                "movingLandmarks": tmplLm.GetID(),
+                "saveTransform": xf.GetID(), "transformType": transformType})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("Fiducial registration failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+            try:
+                rms = float(cli.GetParameterAsString("rms") or 0.0)
+            except ValueError:
+                rms = 0.0
+            # 2. coarse-align the template + atlas into patient space via the landmarks
+            resample(tmpl, tmplCoarse, xf, "Linear", "float")
+            resample(atlasMni, atlasCoarse, xf, "NearestNeighbor", "short")
+            # 3. refine: BRAINSFit the now-close coarse template to the patient (moments-
+            #    init works since they already overlap), Rigid+Affine+BSpline
+            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, {
+                "fixedVolume": volumeNode.GetID(), "movingVolume": tmplCoarse.GetID(),
+                "bsplineTransform": bsp.GetID(), "outputVolume": warpedTmpl.GetID(),
+                "transformType": "Rigid,Affine,BSpline", "initializeTransformMode": "useMomentsAlign",
+                "costMetric": "MMI", "samplingPercentage": 0.05, "splineGridSize": "8,8,8"})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSFit (refine) failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+            # 4. apply the same refinement to the coarse atlas (same space as tmplCoarse)
+            resample(atlasCoarse, warpedAtlas, bsp, "NearestNeighbor", "short")
+            qc = self.atlasRegistrationQC(volumeNode, warpedAtlas, warpedTmpl)
+        except Exception:
+            slicer.mrmlScene.RemoveNode(warpedAtlas)
+            raise
+        finally:
+            for nd in cleanup:
+                slicer.mrmlScene.RemoveNode(nd)
+        return warpedAtlas, qc, rms
 
     def seedRegionRoisFromAtlas(self, volumeNode, atlasLabelmapNode, names=None, sizeScale=1.0):
         """Atlas-seeded scaffold (#4): position each selected Amen region's Box
@@ -3308,4 +3490,19 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertGreater(qc["cerebMax"], 800.0)   # from label 95, not the 9000 artifact
         print("TEST regQC verdict=%s ncc=%.2f containment=%.0f%% cerebMax=%.0f" % (
             qc["verdict"], qc["ncc"], qc["containment"], qc["cerebMax"]))
-        self.delayDisplay("Atlas assets + QC passed")
+
+        # #3 landmark scaffold + pre-stored template landmarks
+        self.assertEqual(len(TEMPLATE_LANDMARKS), 6)
+        lmk = logic.createPatientLandmarkScaffold(vol)
+        self.assertEqual(lmk.GetNumberOfControlPoints(), 6)
+        labels = [lmk.GetNthControlPointLabel(i) for i in range(6)]
+        self.assertEqual(labels, [n for n, _ in TEMPLATE_LANDMARKS])
+        # cerebellum landmark should be posterior-inferior of the phantom brain
+        cerebIdx = labels.index("Cerebellum")
+        cpt = [0.0, 0.0, 0.0]
+        lmk.GetNthControlPointPosition(cerebIdx, cpt)
+        front = [0.0, 0.0, 0.0]
+        lmk.GetNthControlPointPosition(labels.index("Frontal pole"), front)
+        self.assertLess(cpt[1], front[1])   # cerebellum posterior to frontal pole (lower A)
+        print("TEST landmarks n=%d cereb.A=%.0f<front.A=%.0f" % (len(labels), cpt[1], front[1]))
+        self.delayDisplay("Atlas assets + QC + landmarks passed")

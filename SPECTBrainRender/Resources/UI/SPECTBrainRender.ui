@@ -1255,6 +1255,30 @@
        </widget>
       </item>
       <item>
+       <layout class="QHBoxLayout" name="landmarkLayout">
+        <item>
+         <widget class="QPushButton" name="placeLandmarksButton">
+          <property name="text">
+           <string>Place patient landmarks</string>
+          </property>
+          <property name="toolTip">
+           <string>If the auto-registration is REVIEW/FAIL: drop 6 named landmark points (frontal/occipital poles, vertex, cerebellum, L/R temporal) at approximate spots, then drag each onto its true location in the slice views.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="landmarkRealignButton">
+          <property name="text">
+           <string>Re-align atlas from landmarks</string>
+          </property>
+          <property name="toolTip">
+           <string>Fit a transform from your placed landmarks to the template and re-warp the AAL3 atlas onto the patient. Re-runs the QC verdict. The coarse rescue for cases the automatic registration could not align.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
        <layout class="QHBoxLayout" name="atlasModeLayout">
         <item>
          <widget class="QLabel" name="atlasLabel">
