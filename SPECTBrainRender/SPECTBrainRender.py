@@ -1050,7 +1050,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.manualReferenceSpinBox.value = self.cerebellarMax
         self._updatingFromCode = False
         self.refreshReferenceLabel()
-        self.log("Atlas cerebellar reference (robust max of labels 95-120) = %.1f "
+        self.log("Atlas cerebellar reference (max of cerebellum labels 95-120) = %.1f "
                  "counts -> 'Manual reference'. VERIFY it: a poorly registered atlas can "
                  "land the cerebellum mask on a hot focus and inflate it - override the "
                  "value (or place the 'R' box manually) if it looks wrong." % self.cerebellarMax)
@@ -2027,13 +2027,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 removed += 1
         return removed
 
-    def cerebellarMaxFromAtlas(self, volumeNode, atlasLabelmapNode, robustPct=99.5):
-        """Atlas-derived cerebellar reference (#1): a robust max of the warped
-        AAL3 cerebellum labels (95-120). Uses a high percentile, not the raw
-        max, so a single hot-artifact voxel inside the mask cannot inflate the
-        reference (the failure mode seen on poorly-registered cases). Returns
-        float counts, or 0.0 if no cerebellum voxels. This is a SUGGESTED value
-        - the clinician verifies/overrides it in 'Manual reference'."""
+    def cerebellarMaxFromAtlas(self, volumeNode, atlasLabelmapNode, robustPct=100.0):
+        """Atlas-derived cerebellar reference (#1): by default the MAXIMUM count of
+        the warped AAL3 cerebellum labels (95-120) - the clinic's 'Maximum Cerebellar
+        Count' convention. A contaminated/misplaced cerebellum mask (which would
+        inflate the max via a hot artifact) is caught by atlasRegistrationQC
+        (REVIEW/FAIL) for the clinician to override. Pass robustPct < 100 for an
+        artifact-resistant percentile instead. Returns float counts, or 0.0 if no
+        cerebellum voxels. SUGGESTED value - verify/override in 'Manual reference'."""
         import numpy as np
         arr = slicer.util.arrayFromVolume(volumeNode)
         lab = slicer.util.arrayFromVolume(atlasLabelmapNode)
