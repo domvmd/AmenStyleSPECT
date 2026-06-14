@@ -1245,6 +1245,16 @@
        </layout>
       </item>
       <item>
+       <widget class="QPushButton" name="registerAtlasButton">
+        <property name="text">
+         <string>Register atlas to this SPECT (auto)</string>
+        </property>
+        <property name="toolTip">
+         <string>One click: register this SPECT to the bundled MNI HMPAO template and warp the AAL3 atlas into patient space (BRAINSFit, ~30-90 s). Fills 'Warped atlas', auto-sets the cerebellar reference, and reports a registration-quality verdict (PASS / REVIEW / FAIL). On FAIL, use the manual workflow instead.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <layout class="QHBoxLayout" name="atlasModeLayout">
         <item>
          <widget class="QLabel" name="atlasLabel">

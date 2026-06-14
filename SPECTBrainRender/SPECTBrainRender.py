@@ -258,6 +258,7 @@ AMEN_REGIONS_BY_NAME = {r["name"]: r for r in AMEN_REGIONS}
 # ---------------------------------------------------------------------------
 CEREB_ATLAS_LABELS = frozenset(range(95, 121))  # AAL3 cerebellum lobules + vermis
 ATLAS_LUT_PATH = os.path.join(os.path.dirname(__file__), "Resources", "AAL3v1.nii.txt")
+ATLAS_IN_PATIENT_NAME = "AAL3 (in patient)"  # the warped atlas labelmap from registerAtlasToVolume
 
 ATLAS_STEM_TO_AMEN = {
     "Precentral": "Posterior Frontal", "Rolandic_Oper": "Posterior Frontal",
@@ -474,6 +475,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.createRegionScaffoldButton.connect("clicked(bool)", self.onCreateRegionScaffold)
         self.ui.quantifyRegionsButton.connect("clicked(bool)", self.onQuantifyRegions)
         self.ui.exportRegionTsvButton.connect("clicked(bool)", self.onExportRegionTsv)
+        self.ui.registerAtlasButton.connect("clicked(bool)", self.onRegisterAtlas)
         self.ui.setReferenceFromAtlasButton.connect("clicked(bool)", self.onSetReferenceFromAtlas)
         self.ui.seedRegionsFromAtlasButton.connect("clicked(bool)", self.onSeedRegionsFromAtlas)
         self.ui.quantifyFromAtlasButton.connect("clicked(bool)", self.onQuantifyFromAtlas)
@@ -506,6 +508,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.exportSurfaceButton, self.ui.exportActiveButton,
             self.ui.createRegionScaffoldButton, self.ui.quantifyRegionsButton,
             self.ui.exportRegionTsvButton,
+            self.ui.registerAtlasButton,
             self.ui.setReferenceFromAtlasButton, self.ui.seedRegionsFromAtlasButton,
             self.ui.quantifyFromAtlasButton,
         ):
@@ -975,6 +978,55 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "true structure, then 'Quantify regions'. The cerebellum reference "
                 "ROI for '%s' is separate (use 'Create cerebellum ROI')." % REGION_REF_MEAN)
         self.log(msg)
+
+    def onRegisterAtlas(self):
+        # #2b: register the SPECT to the bundled template + warp AAL3 in, in one click.
+        node = self.currentVolumeNode()
+        if node is None:
+            self.log("Select a SPECT volume first.")
+            return
+        if not self.ui.orientationConfirmedCheckBox.checked:
+            self.log("WARNING: orientation not confirmed - confirm L/R before reading laterality.")
+        self.log("Registering to the MNI HMPAO template and warping AAL3 in - runs "
+                 "BRAINSFit, may take ~30-90 s ...")
+        slicer.app.processEvents()
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            warpedAtlas, qc = self.logic.registerAtlasToVolume(node)
+        except Exception as exc:
+            self.log("Atlas registration failed: %s" % exc)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self.ui.atlasLabelmapSelector.setCurrentNode(warpedAtlas)
+        # auto-fill the cerebellar reference from the freshly warped atlas (verify it)
+        refNote = ""
+        try:
+            ref = self.logic.cerebellarMaxFromAtlas(node, warpedAtlas)
+            if ref > 0:
+                self.cerebellarMax = float(ref)
+                self._updatingFromCode = True
+                self.ui.manualReferenceSpinBox.value = self.cerebellarMax
+                self._updatingFromCode = False
+                self.refreshReferenceLabel()
+                refNote = " Cerebellar reference auto-set to %.0f (verify/override)." % self.cerebellarMax
+        except Exception:
+            pass
+        flags = ",".join(qc["flags"]) if qc["flags"] else "-"
+        msg = ("Registration QC: %s  [containment %.0f%%, cerebellum/brain %.2f, "
+               "template-match NCC %.2f, cerebMax %.0f].%s" % (
+                   qc["verdict"], qc["containment"], qc["cerebRatio"], qc["ncc"],
+                   qc["cerebMax"], refNote))
+        if qc["verdict"] == "PASS":
+            msg += " Looks good - now 'Quantify from atlas (exact masks)'."
+        elif qc["verdict"] == "REVIEW":
+            msg += (" REVIEW [%s]: eyeball the atlas overlay on the SPECT before trusting it "
+                    "(a low NCC can be an atypical perfusion pattern, not a bad fit). Check the "
+                    "cerebellar reference especially." % flags)
+        else:
+            msg += (" FAIL [%s]: registration unreliable for this case - fall back to the manual "
+                    "workflow (place the cerebellum 'R' box + 'Create selected region ROIs')." % flags)
+        self.log(msg, replace=True)
 
     def onSetReferenceFromAtlas(self):
         # #1: read a robust cerebellar reference from the warped atlas cerebellum
@@ -1994,6 +2046,102 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             return 0.0
         return float(np.percentile(vals, robustPct))
 
+    def atlasRegistrationQC(self, volumeNode, atlasLabelmapNode, warpedTemplateNode, robustPct=99.5):
+        """Ground-truth-free QC for an atlas registration (no normal DB needed).
+        Thresholds recalibrated from the 12-case cohort. Returns a dict with the
+        metrics + 'flags' + a 'verdict' in {PASS, REVIEW, FAIL}. NCC low can mean
+        a spatial failure OR an atypical-but-correct perfusion pattern, so a low
+        NCC alone is REVIEW (eyeball the overlay), not FAIL."""
+        import numpy as np
+        raw = slicer.util.arrayFromVolume(volumeNode).astype(float)
+        A = slicer.util.arrayFromVolume(atlasLabelmapNode)
+        T = slicer.util.arrayFromVolume(warpedTemplateNode).astype(float)
+        robustMax = float(np.percentile(raw[raw > 0], robustPct)) if (raw > 0).any() else 0.0
+        cerebMask = np.isin(A, list(CEREB_ATLAS_LABELS))
+        cerebMax = float(raw[cerebMask].max()) if cerebMask.any() else 0.0
+        brain = self._largestIslandMask(volumeNode, (cerebMax or robustMax) * 0.30, 2)
+        nBrain = int(brain.sum())
+        containment = 100.0 * int(((A > 0) & brain).sum()) / max(int((A > 0).sum()), 1)
+        cerebRatio = (float(raw[cerebMask].mean() / raw[brain].mean())
+                      if (cerebMask.any() and nBrain) else 0.0)
+        refRatio = (cerebMax / robustMax) if robustMax else 0.0
+        if nBrain:
+            a = raw[brain] - raw[brain].mean()
+            b = T[brain] - T[brain].mean()
+            ncc = float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-9))
+        else:
+            ncc = 0.0
+        flags = []
+        if containment < 80:
+            flags.append("containment")
+        if not (0.85 <= cerebRatio <= 1.4):
+            flags.append("cerebRatio")
+        if ncc < 0.70:
+            flags.append("ncc")
+        if refRatio and refRatio < 0.85:
+            flags.append("reference")
+        verdict = ("PASS" if not flags
+                   else "FAIL" if ("containment" in flags and "ncc" in flags) else "REVIEW")
+        return dict(containment=containment, cerebRatio=cerebRatio, ncc=ncc, cerebMax=cerebMax,
+                    robustMax=robustMax, refRatio=refRatio, nBrain=nBrain,
+                    flags=flags, verdict=verdict)
+
+    def registerAtlasToVolume(self, volumeNode, deformable=True):
+        """#2b: register this SPECT to the bundled MNI HMPAO template and warp the
+        bundled AAL3 atlas into the patient's space - one call, no external script.
+        BRAINSFit (Rigid+Affine[+BSpline]) then BRAINSResample (nearest-neighbour);
+        the template + atlas are MNI-aligned so the same transform carries the atlas
+        across. Returns (warpedAtlasLabelmapNode, qc). Intermediate nodes are removed;
+        only the warped atlas labelmap is kept (named ATLAS_IN_PATIENT_NAME)."""
+        base = os.path.join(os.path.dirname(__file__), "Resources", "Atlas")
+        templatePath = os.path.join(base, "SPECT_HMPAO_template.nii.gz")
+        atlasPath = os.path.join(base, "AAL3v1.nii")
+        if not (os.path.exists(templatePath) and os.path.exists(atlasPath)):
+            raise RuntimeError("Bundled atlas/template not found under Resources/Atlas.")
+        tmpl = slicer.util.loadVolume(templatePath)
+        atlasMni = slicer.util.loadVolume(atlasPath)
+        old = slicer.mrmlScene.GetFirstNodeByName(ATLAS_IN_PATIENT_NAME)
+        if old:
+            slicer.mrmlScene.RemoveNode(old)
+        warpedAtlas = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLLabelMapVolumeNode", ATLAS_IN_PATIENT_NAME)
+        warpedTmpl = slicer.mrmlScene.AddNewNodeByClass(
+            "vtkMRMLScalarVolumeNode", "AtlasTemplateInPatient")
+        transformType = "Rigid,Affine,BSpline" if deformable else "Rigid,Affine"
+        if deformable:
+            xf = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLBSplineTransformNode", "AtlasReg")
+            xfKey = "bsplineTransform"
+        else:
+            xf = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", "AtlasReg")
+            xfKey = "linearTransform"
+        cleanup = [tmpl, atlasMni, warpedTmpl, xf]
+        try:
+            fitParams = {
+                "fixedVolume": volumeNode.GetID(), "movingVolume": tmpl.GetID(),
+                xfKey: xf.GetID(), "outputVolume": warpedTmpl.GetID(),
+                "transformType": transformType, "initializeTransformMode": "useMomentsAlign",
+                "costMetric": "MMI", "samplingPercentage": 0.05,
+            }
+            if deformable:
+                fitParams["splineGridSize"] = "8,8,8"
+            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, fitParams)
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSFit failed: " + (cli.GetParameterAsString("errorText") or "?"))
+            cli = slicer.cli.runSync(slicer.modules.brainsresample, None, {
+                "inputVolume": atlasMni.GetID(), "referenceVolume": volumeNode.GetID(),
+                "outputVolume": warpedAtlas.GetID(), "warpTransform": xf.GetID(),
+                "interpolationMode": "NearestNeighbor", "pixelType": "short"})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSResample failed: " + (cli.GetParameterAsString("errorText") or "?"))
+            qc = self.atlasRegistrationQC(volumeNode, warpedAtlas, warpedTmpl)
+        except Exception:
+            slicer.mrmlScene.RemoveNode(warpedAtlas)
+            raise
+        finally:
+            for n in cleanup:
+                slicer.mrmlScene.RemoveNode(n)
+        return warpedAtlas, qc
+
     def seedRegionRoisFromAtlas(self, volumeNode, atlasLabelmapNode, names=None, sizeScale=1.0):
         """Atlas-seeded scaffold (#4): position each selected Amen region's Box
         ROI at the CENTROID of its mapped AAL3 voxels in the warped atlas - a
@@ -2589,6 +2737,7 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.test_QuantifyMasksExtracranial()
         self.test_OrdinalGrade()
         self.test_AtlasSeedAndReference()
+        self.test_AtlasRegistrationAssets()
 
     def _makePhantom(self):
         """Ellipsoid 'brain' (~600), a cerebellum-like hot region posterior-inferior
@@ -3121,3 +3270,41 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertIsInstance(logic.formatRegionReport(rows2, meta2), str)
         print("TEST atlasQuant rows=%d names=%d report_ok=True" % (len(rows2), len(names2)))
         self.delayDisplay("Atlas seed + reference + exact-mask quantify passed")
+
+    def test_AtlasRegistrationAssets(self):
+        """Bundled atlas/template present + registration-QC math (#2b). Does NOT run
+        BRAINSFit (slow + meaningless on the phantom); the full registration is
+        validated separately on real data."""
+        self.delayDisplay("Atlas assets + registration QC (#2b)")
+        import os
+        import numpy as np
+        base = os.path.join(os.path.dirname(__file__), "Resources", "Atlas")
+        tpath = os.path.join(base, "SPECT_HMPAO_template.nii.gz")
+        apath = os.path.join(base, "AAL3v1.nii")
+        self.assertTrue(os.path.exists(tpath), "bundled HMPAO template missing")
+        self.assertTrue(os.path.exists(apath), "bundled AAL3 atlas missing")
+        slicer.mrmlScene.Clear()
+        logic = SPECTBrainRenderLogic()
+        atl = slicer.util.loadVolume(apath)
+        self.assertEqual(tuple(slicer.util.arrayFromVolume(atl).shape), (91, 109, 91))
+        # QC math: phantom + synthetic warped atlas; phantom as its own 'warped
+        # template' so NCC == 1 exercises the correlation formula.
+        vol = self._makePhantom()
+        arr = slicer.util.arrayFromVolume(vol)
+        nz, ny, nx = arr.shape
+        zz, yy, xx = np.mgrid[0:nz, 0:ny, 0:nx].astype(float)
+        cz, cy, cx = nz / 2.0, ny / 2.0, nx / 2.0
+        lab = np.zeros(arr.shape, dtype=np.int16)
+        lab[arr > 400] = 1   # generic cortex label across the brain
+        lab[((xx - cx) ** 2 / 12.0 ** 2 + (yy - (cy - 16)) ** 2 / 8.0 ** 2 +
+             (zz - (cz - 12)) ** 2 / 6.0 ** 2) <= 1.0] = 95   # cerebellum
+        synth = slicer.util.addVolumeFromArray(
+            lab, name="qcAtlas", nodeClassName="vtkMRMLLabelMapVolumeNode")
+        synth.SetSpacing(3.0, 3.0, 3.0)
+        qc = logic.atlasRegistrationQC(vol, synth, vol)
+        self.assertIn(qc["verdict"], ("PASS", "REVIEW", "FAIL"))
+        self.assertGreater(qc["ncc"], 0.99)         # phantom vs itself
+        self.assertGreater(qc["cerebMax"], 800.0)   # from label 95, not the 9000 artifact
+        print("TEST regQC verdict=%s ncc=%.2f containment=%.0f%% cerebMax=%.0f" % (
+            qc["verdict"], qc["ncc"], qc["containment"], qc["cerebMax"]))
+        self.delayDisplay("Atlas assets + QC passed")
