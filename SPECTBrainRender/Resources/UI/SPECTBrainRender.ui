@@ -1318,6 +1318,16 @@
        </layout>
       </item>
       <item>
+       <widget class="QPushButton" name="quantifyFromAtlasButton">
+        <property name="text">
+         <string>Quantify from atlas (exact masks)</string>
+        </property>
+        <property name="toolTip">
+         <string>Fully automatic: read each region's uptake from its PRECISE AAL3 voxels in the warped atlas - no Box ROIs needed. Set the reference first ('Set reference from atlas cerebellum'). Produces the same report + table + TSV as 'Quantify regions'.</string>
+        </property>
+       </widget>
+      </item>
+      <item>
        <widget class="QPushButton" name="exportRegionTsvButton">
         <property name="text">
          <string>Export regional table (TSV)</string>

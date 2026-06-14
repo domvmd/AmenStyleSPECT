@@ -476,6 +476,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.exportRegionTsvButton.connect("clicked(bool)", self.onExportRegionTsv)
         self.ui.setReferenceFromAtlasButton.connect("clicked(bool)", self.onSetReferenceFromAtlas)
         self.ui.seedRegionsFromAtlasButton.connect("clicked(bool)", self.onSeedRegionsFromAtlas)
+        self.ui.quantifyFromAtlasButton.connect("clicked(bool)", self.onQuantifyFromAtlas)
         self.ui.regionTableWidget.connect("cellDoubleClicked(int,int)", self.onRegionRowDoubleClicked)
         self._regionRows = []
 
@@ -506,6 +507,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.createRegionScaffoldButton, self.ui.quantifyRegionsButton,
             self.ui.exportRegionTsvButton,
             self.ui.setReferenceFromAtlasButton, self.ui.seedRegionsFromAtlasButton,
+            self.ui.quantifyFromAtlasButton,
         ):
             w.setEnabled(hasVolume)
 
@@ -1031,6 +1033,45 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         msg += (". STARTING positions from the warped atlas - drag each box to fine-tune, "
                 "then 'Quantify regions'.")
         self.log(msg)
+
+    def onQuantifyFromAtlas(self):
+        # #2: fully automatic exact-mask quantification from the warped atlas.
+        node = self.currentVolumeNode()
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        if node is None or atlas is None:
+            self.log("Select a volume and a warped atlas labelmap first.")
+            return
+        if not self.ui.orientationConfirmedCheckBox.checked:
+            self.log("WARNING: orientation not confirmed - do not read laterality yet.")
+        if self.cerebellarMax <= 0:
+            self.log("Set the cerebellar reference first ('Set reference from atlas "
+                     "cerebellum', or enter it in 'Manual reference').")
+            return
+        try:
+            stats, _ = self.logic.computeStatistics(node, self.ui.robustPercentileSpinBox.value)
+            robust = stats["robustMax"]
+        except Exception:
+            robust = 0.0
+        p = self._regionParams()
+        opts = self.preprocessOptions()
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            rows, meta = self.logic.quantifyRegionsFromAtlas(
+                node, atlas, self.cerebellarMax, robustReference=robust,
+                maskToBrain=opts["keepLargestIsland"], islandPct=opts["islandPct"],
+                islandErode=opts["islandErode"], **p)
+        except Exception as exc:
+            self.log("Atlas quantification failed: %s" % exc)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        if not rows:
+            self.log("No atlas regions found - is the labelmap the AAL3 atlas warped "
+                     "into THIS patient's space?")
+            return
+        self._regionRows = rows
+        self._populateRegionTable(rows)
+        self.log(self.logic.formatRegionReport(rows, meta), replace=True)
 
     def onQuantifyRegions(self):
         node = self.currentVolumeNode()
@@ -2015,6 +2056,121 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             self.createRegionRoiScaffold(volumeNode, names=fallback, sizeScale=sizeScale)
         return nSeeded, len(fallback)
 
+    def quantifyRegionsFromAtlas(self, volumeNode, atlasLabelmapNode, cerebellarMax,
+                                 metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX,
+                                 hypoPct=DEFAULT_HYPO_PCT, hyperPct=DEFAULT_HYPER_PCT,
+                                 floorPct=DEFAULT_REGION_FLOOR_PCT,
+                                 asymmetryPct=DEFAULT_ASYMMETRY_PCT, robustReference=0.0,
+                                 focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
+                                 minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
+                                 maskToBrain=True, islandPct=30.0, islandErode=2,
+                                 hyperWhitePct=DEFAULT_HYPER_WHITE_PCT,
+                                 hyperTopPct=DEFAULT_HYPER_TOP_PCT,
+                                 hypoStepPct=DEFAULT_HYPO_STEP_PCT):
+        """Exact-mask regional quantification (#2): pool each Amen region's precise
+        AAL3 voxels from the warped atlas (no Box ROIs) and classify with the same
+        bands/grading as quantifyRegions. Returns (rows, meta) in the SAME shape, so
+        formatRegionReport / exportRegionTsv / the table render it unchanged.
+
+        Reference = the cerebellar MAX value passed in (supply the atlas-derived one
+        from cerebellarMaxFromAtlas, or a manual override). ATLAS-MODE focal test is
+        hot-FRACTION only: a flat hot-voxel COUNT over-fires on large atlas regions
+        (a 500-voxel region trivially holds >3 hot voxels), so minHotVoxels is unused
+        here. NOTE: aggregating fine parcels also dilutes focal hot spots - the known
+        trade-off vs. fine-parcel detection."""
+        import numpy as np
+        arrFull = slicer.util.arrayFromVolume(volumeNode)
+        lab = slicer.util.arrayFromVolume(atlasLabelmapNode)
+        if arrFull.shape != lab.shape:
+            raise ValueError("Atlas labelmap geometry does not match the volume - "
+                             "resample the warped atlas onto the volume grid first.")
+        refval = float(cerebellarMax) if cerebellarMax and cerebellarMax > 0 else float(robustReference)
+        if not refval or refval <= 0:
+            raise ValueError("Reference value unavailable - set the cerebellar max "
+                             "('Set reference from atlas cerebellum' or 'Manual reference').")
+        floor = refval * floorPct / 100.0
+        hotThreshold = refval * hyperPct / 100.0
+        masked = bool(maskToBrain and refval > 0)
+        if masked:
+            brain = self._largestIslandMask(volumeNode, refval * islandPct / 100.0, int(islandErode))
+            arr = np.array(arrFull, dtype=float)
+            arr[~brain] = 0.0
+        else:
+            arr = np.asarray(arrFull, dtype=float)
+        usePeak = (metric == REGION_METRIC_PEAK)
+
+        pools = {}
+        for labelVal, key in atlasLabelToRegion().items():
+            pools.setdefault(key, []).append(labelVal)
+
+        rows = []
+        for (base, side), labels in pools.items():
+            tissue = arr[np.isin(lab, labels)]
+            tissue = tissue[tissue > floor]
+            if tissue.size == 0:
+                continue
+            mean, peak = float(tissue.mean()), float(tissue.max())
+            val = peak if usePeak else mean
+            hot = tissue[tissue >= hotThreshold]
+            hotN = int(hot.size)
+            hotFrac = 100.0 * hotN / tissue.size
+            hotMeanPct = (float(hot.mean()) / refval * 100.0) if hotN else None
+            pct = val / refval * 100.0
+            focal = bool(focalHyper and hotFrac >= minHotFrac)   # atlas: fraction-only
+            if focal or pct > hyperPct:
+                cls = "Hyperactive"
+            elif pct < hypoPct:
+                cls = "Hypoactive"
+            else:
+                cls = "Normal"
+            grade = 0
+            if cls == "Hyperactive":
+                hv = hotMeanPct if hotMeanPct is not None else pct
+                grade = 1 + (hv >= hyperWhitePct) + (hv >= 100.0) + (hv >= hyperTopPct)
+            elif cls == "Hypoactive":
+                steps = int((hypoPct - pct) / hypoStepPct) if hypoStepPct > 0 else 0
+                grade = -min(4, 1 + max(0, steps))
+            name = base if side == "M" else "%s %s" % (side, base)
+            exact = AMEN_REGIONS_BY_NAME.get(name)
+            grpSchema = (exact or AMEN_REGIONS_BY_NAME.get("L " + base)
+                         or AMEN_REGIONS_BY_NAME.get("R " + base))
+            rows.append(dict(
+                name=name, group=grpSchema["group"] if grpSchema else "Subcortical",
+                side=side, base=base, note=exact["note"] if exact else "",
+                value=val, pct=pct, cls=cls, grade=grade, focal=focal,
+                nvox=int(tissue.size), hotN=hotN, hotFrac=hotFrac, hotMeanPct=hotMeanPct,
+                asym=None, asymFlag=False))
+
+        byBaseSide = {}
+        for row in rows:
+            if row["side"] in ("L", "R"):
+                byBaseSide.setdefault(row["base"], {})[row["side"]] = row
+        for base, sides in byBaseSide.items():
+            if "L" in sides and "R" in sides:
+                lv, rv = sides["L"]["value"], sides["R"]["value"]
+                denom = (lv + rv) / 2.0
+                if denom > 0:
+                    asym = (lv - rv) / denom * 100.0
+                    flag = abs(asym) > asymmetryPct
+                    for s in ("L", "R"):
+                        sides[s]["asym"] = asym
+                        sides[s]["asymFlag"] = flag
+
+        rows.sort(key=lambda r: r["pct"])
+        meta = dict(refval=refval, reflabel="cerebellar max", floor=floor, metric=metric,
+                    hypoPct=hypoPct, hyperPct=hyperPct, asymmetryPct=asymmetryPct,
+                    focalHyper=focalHyper, minHotVoxels=minHotVoxels, minHotFrac=minHotFrac,
+                    hotThreshold=hotThreshold, masked=masked,
+                    hyperWhitePct=hyperWhitePct, hyperTopPct=hyperTopPct, hypoStepPct=hypoStepPct,
+                    nHypo=sum(1 for r in rows if r["cls"] == "Hypoactive"),
+                    nHyper=sum(1 for r in rows if r["cls"] == "Hyperactive"),
+                    gradeCounts={g: sum(1 for r in rows if r["grade"] == g)
+                                 for g in range(-4, 5) if g != 0},
+                    nFocal=sum(1 for r in rows if r["focal"]),
+                    nAsym=sum(1 for r in rows if r["asymFlag"] and r["side"] == "L"),
+                    nRegions=len(rows))
+        return rows, meta
+
     def quantifyRegions(self, volumeNode, referenceRoiNode, cerebellarMax,
                         metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX,
                         hypoPct=DEFAULT_HYPO_PCT, hyperPct=DEFAULT_HYPER_PCT,
@@ -2951,4 +3107,17 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertLess(cL[0], cR[0])  # L seeded left of R (module's L=low-x convention)
         print("TEST atlas ref=%.0f seeded=%d fallback=%d L.x=%.0f<R.x=%.0f" % (
             ref, nSeed, nFall, cL[0], cR[0]))
-        self.delayDisplay("Atlas seed + reference passed")
+
+        # #2a: exact-mask quantification -> same (rows, meta) shape the report uses
+        rows2, meta2 = logic.quantifyRegionsFromAtlas(vol, atlas, 870.0, maskToBrain=False)
+        names2 = {r["name"] for r in rows2}
+        self.assertIn("L Dorsolateral PFC", names2)
+        self.assertIn("R Dorsolateral PFC", names2)
+        for key in ("name", "group", "side", "value", "pct", "cls", "grade",
+                    "focal", "hotN", "hotFrac", "asym", "asymFlag", "note"):
+            self.assertIn(key, rows2[0])
+        for key in ("nHypo", "nHyper", "gradeCounts", "refval", "nRegions"):
+            self.assertIn(key, meta2)
+        self.assertIsInstance(logic.formatRegionReport(rows2, meta2), str)
+        print("TEST atlasQuant rows=%d names=%d report_ok=True" % (len(rows2), len(names2)))
+        self.delayDisplay("Atlas seed + reference + exact-mask quantify passed")
