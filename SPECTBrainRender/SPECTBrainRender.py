@@ -249,6 +249,83 @@ AMEN_REGIONS = expandRegionSpecs(REGION_SPECS)
 AMEN_REGIONS_BY_NAME = {r["name"]: r for r in AMEN_REGIONS}
 
 
+# ---------------------------------------------------------------------------
+# AAL3 atlas -> Amen taxonomy. A warped AAL3 labelmap (in patient space,
+# produced by the registration step) seeds the region Box ROIs at atlas
+# centroids (#4) and supplies the cerebellar reference (#1). DRAFT grouping -
+# pending clinical sign-off (frontal pole vs ant-lateral PFC, Broca = pars
+# opercularis, fusiform, postcentral+precuneus, the deep-limbic bucket).
+# ---------------------------------------------------------------------------
+CEREB_ATLAS_LABELS = frozenset(range(95, 121))  # AAL3 cerebellum lobules + vermis
+ATLAS_LUT_PATH = os.path.join(os.path.dirname(__file__), "Resources", "AAL3v1.nii.txt")
+
+ATLAS_STEM_TO_AMEN = {
+    "Precentral": "Posterior Frontal", "Rolandic_Oper": "Posterior Frontal",
+    "Supp_Motor_Area": "Posterior Frontal", "Paracentral_Lobule": "Posterior Frontal",
+    "Frontal_Sup_2": "Prefrontal Pole", "Frontal_Mid_2": "Dorsolateral PFC",
+    "Frontal_Inf_Oper": "Inferior Frontal Gyrus (Broca's)",
+    "Frontal_Inf_Tri": "Anterior Lateral PFC", "Frontal_Inf_Orb_2": "Anterior Lateral PFC",
+    "Frontal_Sup_Medial": "Medial PFC", "Frontal_Med_Orb": "Medial PFC", "Rectus": "Medial PFC",
+    "Olfactory": "Inferior Orbital PFC", "OFCmed": "Inferior Orbital PFC",
+    "OFCant": "Inferior Orbital PFC", "OFCpost": "Inferior Orbital PFC", "OFClat": "Inferior Orbital PFC",
+    "Insula": "Insular Cortex",
+    "Cingulate_Mid": "Middle Cingulate", "Cingulate_Post": "Posterior Cingulate",
+    "ACC_sub": "Anterior Cingulate - Ventral", "ACC_pre": "Anterior Cingulate - Genu",
+    "ACC_sup": "Anterior Cingulate - Dorsal",
+    "Hippocampus": "Medial Temporal - Hippocampus", "ParaHippocampal": "Medial Temporal - Posterior",
+    "Amygdala": "Medial Temporal - Amygdala",
+    "Temporal_Pole_Sup": "Lateral Temporal - Anterior", "Temporal_Pole_Mid": "Lateral Temporal - Anterior",
+    "Heschl": "Lateral Temporal - Middle", "Temporal_Sup": "Lateral Temporal - Middle",
+    "Temporal_Mid": "Lateral Temporal - Middle",
+    "Temporal_Inf": "Lateral Temporal - Posterior", "Fusiform": "Lateral Temporal - Posterior",
+    "Postcentral": "Superior Parietal", "Parietal_Sup": "Superior Parietal", "Precuneus": "Superior Parietal",
+    "Parietal_Inf": "Inferior Parietal", "SupraMarginal": "Inferior Parietal", "Angular": "Inferior Parietal",
+    "Calcarine": "Primary Visual Cortex",
+    "Cuneus": "Visual Association Cortex", "Lingual": "Visual Association Cortex",
+    "Occipital_Sup": "Visual Association Cortex", "Occipital_Mid": "Visual Association Cortex",
+    "Occipital_Inf": "Visual Association Cortex",
+    "Caudate": "Basal Ganglia (Caudate/Putamen)", "Putamen": "Basal Ganglia (Caudate/Putamen)",
+    "Pallidum": "Basal Ganglia (Caudate/Putamen)",
+    "N_Acc": "Deep Limbic / Thalamic", "VTA": "Deep Limbic / Thalamic", "Red_N": "Deep Limbic / Thalamic",
+}
+ATLAS_PREFIX_TO_AMEN = [
+    ("Thal_", "Thalamus"), ("Cerebellum_", "Cerebellum"), ("Vermis_", "Cerebellum"),
+    ("SN_", "Deep Limbic / Thalamic"), ("LC", "Deep Limbic / Thalamic"), ("Raphe", "Deep Limbic / Thalamic"),
+]
+
+
+def _atlasAmenOf(name):
+    """(amen_base, side) for an AAL3 region name; (None, side) if unmapped.
+    Side from the _L/_R suffix, else 'M' (midline: vermis, raphe)."""
+    if name.endswith("_L") or name.endswith("_R"):
+        stem, side = name[:-2], name[-1]
+    else:
+        stem, side = name, "M"
+    base = ATLAS_STEM_TO_AMEN.get(stem)
+    if base is None:
+        for pre, mapped in ATLAS_PREFIX_TO_AMEN:
+            if stem.startswith(pre):
+                base = mapped
+                break
+    return base, side
+
+
+def atlasLabelToRegion(lutPath=ATLAS_LUT_PATH):
+    """{label_int: (amen_base, side)} from the bundled AAL3 lookup table."""
+    out = {}
+    try:
+        with open(lutPath) as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    base, side = _atlasAmenOf(parts[1])
+                    if base is not None:
+                        out[int(parts[0])] = (base, side)
+    except OSError:
+        pass
+    return out
+
+
 def _qcount(getter):
     """PythonQt exposes parameterless Qt count getters (e.g. topLevelItemCount,
     childCount) as int PROPERTIES rather than methods; tolerate either form."""
@@ -1795,6 +1872,87 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 removed += 1
         return removed
 
+    def cerebellarMaxFromAtlas(self, volumeNode, atlasLabelmapNode, robustPct=99.5):
+        """Atlas-derived cerebellar reference (#1): a robust max of the warped
+        AAL3 cerebellum labels (95-120). Uses a high percentile, not the raw
+        max, so a single hot-artifact voxel inside the mask cannot inflate the
+        reference (the failure mode seen on poorly-registered cases). Returns
+        float counts, or 0.0 if no cerebellum voxels. This is a SUGGESTED value
+        - the clinician verifies/overrides it in 'Manual reference'."""
+        import numpy as np
+        arr = slicer.util.arrayFromVolume(volumeNode)
+        lab = slicer.util.arrayFromVolume(atlasLabelmapNode)
+        if arr.shape != lab.shape:
+            raise ValueError("Atlas labelmap geometry does not match the volume - "
+                             "resample the warped atlas onto the volume grid first.")
+        vals = arr[np.isin(lab, list(CEREB_ATLAS_LABELS))]
+        vals = vals[vals > 0]
+        if vals.size == 0:
+            return 0.0
+        return float(np.percentile(vals, robustPct))
+
+    def seedRegionRoisFromAtlas(self, volumeNode, atlasLabelmapNode, names=None, sizeScale=1.0):
+        """Atlas-seeded scaffold (#4): position each selected Amen region's Box
+        ROI at the CENTROID of its mapped AAL3 voxels in the warped atlas - a
+        better starting point than createRegionRoiScaffold's fixed anatomical
+        fractions. Box SIZE keeps the same GROUP_BOX_FRAC convention so the
+        clinician still drags each box to fine-tune. Regions absent from the
+        atlas fall back to the fractional scaffold. Returns (nSeeded, nFallback)."""
+        import numpy as np
+        regionLabels = {}
+        for labelVal, key in atlasLabelToRegion().items():
+            regionLabels.setdefault(key, []).append(labelVal)
+        lab = slicer.util.arrayFromVolume(atlasLabelmapNode)
+        ijkToRas = vtk.vtkMatrix4x4()
+        atlasLabelmapNode.GetIJKToRASMatrix(ijkToRas)
+        bounds = [0.0] * 6
+        volumeNode.GetRASBounds(bounds)
+        ex = (bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4])
+        selected = None if names is None else set(names)
+
+        sh = slicer.mrmlScene.GetSubjectHierarchyNode()
+        folderItem = 0
+        if sh is not None:
+            folderItem = sh.GetItemChildWithName(sh.GetSceneItemID(), REGION_FOLDER_NAME)
+            if not folderItem:
+                folderItem = sh.CreateFolderItem(sh.GetSceneItemID(), REGION_FOLDER_NAME)
+
+        nSeeded = 0
+        fallback = []
+        for reg in AMEN_REGIONS:
+            if selected is not None and reg["name"] not in selected:
+                continue
+            labels = regionLabels.get((reg["base"], reg["side"]))
+            center = None
+            if labels:
+                ks, js, iis = np.where(np.isin(lab, labels))
+                if iis.size:
+                    center = ijkToRas.MultiplyPoint(
+                        [float(iis.mean()), float(js.mean()), float(ks.mean()), 1.0])[:3]
+            if center is None:
+                fallback.append(reg["name"])
+                continue
+            frac = GROUP_BOX_FRAC.get(reg["group"], DEFAULT_BOX_FRAC) * sizeScale
+            roi = slicer.mrmlScene.GetFirstNodeByName(reg["name"])
+            if not roi or not roi.IsA("vtkMRMLMarkupsROINode"):
+                roi = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", reg["name"])
+                roi.CreateDefaultDisplayNodes()
+            roi.SetCenter(center[0], center[1], center[2])
+            roi.SetSize(frac * ex[0], frac * ex[1], frac * ex[2])
+            dn = roi.GetDisplayNode()
+            if dn:
+                dn.SetHandlesInteractive(True)
+                try:
+                    dn.SetFillOpacity(0.15)
+                except Exception:
+                    pass
+            if sh is not None and folderItem:
+                sh.SetItemParent(sh.GetItemByDataNode(roi), folderItem)
+            nSeeded += 1
+        if fallback:
+            self.createRegionRoiScaffold(volumeNode, names=fallback, sizeScale=sizeScale)
+        return nSeeded, len(fallback)
+
     def quantifyRegions(self, volumeNode, referenceRoiNode, cerebellarMax,
                         metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX,
                         hypoPct=DEFAULT_HYPO_PCT, hyperPct=DEFAULT_HYPER_PCT,
@@ -2212,6 +2370,7 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.test_FocalHyperactive()
         self.test_QuantifyMasksExtracranial()
         self.test_OrdinalGrade()
+        self.test_AtlasSeedAndReference()
 
     def _makePhantom(self):
         """Ellipsoid 'brain' (~600), a cerebellum-like hot region posterior-inferior
@@ -2684,3 +2843,50 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
             by["+4 top"]["grade"], by["-1 mild"]["grade"], by["-4 severe"]["grade"],
             by["normal"]["grade"]))
         self.delayDisplay("Ordinal grade passed")
+
+    def test_AtlasSeedAndReference(self):
+        """Atlas-derived cerebellar reference (#1) + atlas-seeded region ROIs (#4)."""
+        self.delayDisplay("Atlas seed + reference (#1 + #4)")
+        import numpy as np
+        slicer.mrmlScene.Clear()
+        logic = SPECTBrainRenderLogic()
+        vol = self._makePhantom()
+        arr = slicer.util.arrayFromVolume(vol)
+        nz, ny, nx = arr.shape
+        zz, yy, xx = np.mgrid[0:nz, 0:ny, 0:nx].astype(float)
+        cz, cy, cx = nz / 2.0, ny / 2.0, nx / 2.0
+        lab = np.zeros(arr.shape, dtype=np.int16)
+        # cerebellum (AAL 95) over the phantom's posterior-inferior hot region (~870)
+        cereb = ((xx - cx) ** 2 / 12.0 ** 2 + (yy - (cy - 16)) ** 2 / 8.0 ** 2 +
+                 (zz - (cz - 12)) ** 2 / 6.0 ** 2) <= 1.0
+        lab[cereb] = 95
+        # Frontal_Mid_2_L/R (AAL 5/6 -> Dorsolateral PFC), L on low-x side
+        lab[((xx - (cx - 10)) ** 2 + (yy - (cy + 12)) ** 2 + (zz - (cz + 8)) ** 2) < 5.0 ** 2] = 5
+        lab[((xx - (cx + 10)) ** 2 + (yy - (cy + 12)) ** 2 + (zz - (cz + 8)) ** 2) < 5.0 ** 2] = 6
+        atlas = slicer.util.addVolumeFromArray(
+            lab, name="SynthAAL", nodeClassName="vtkMRMLLabelMapVolumeNode")
+        atlas.SetSpacing(3.0, 3.0, 3.0)
+
+        # mapping sanity (bundled LUT + draft grouping)
+        l2r = atlasLabelToRegion()
+        self.assertEqual(l2r[95], ("Cerebellum", "L"))
+        self.assertEqual(l2r[5], ("Dorsolateral PFC", "L"))
+        self.assertEqual(l2r[6], ("Dorsolateral PFC", "R"))
+
+        # #1: reference ~870 from the cerebellum labels, NOT the 9000 artifact (label 0)
+        ref = logic.cerebellarMaxFromAtlas(vol, atlas)
+        self.assertGreater(ref, 800.0)
+        self.assertLess(ref, 950.0)
+
+        # #4: seed the two DLPFC boxes from the atlas; L Thalamus (absent) falls back
+        nSeed, nFall = logic.seedRegionRoisFromAtlas(
+            vol, atlas, names=["L Dorsolateral PFC", "R Dorsolateral PFC", "L Thalamus"])
+        self.assertEqual((nSeed, nFall), (2, 1))
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 3)
+        cL, cR = [0.0] * 3, [0.0] * 3
+        slicer.mrmlScene.GetFirstNodeByName("L Dorsolateral PFC").GetCenter(cL)
+        slicer.mrmlScene.GetFirstNodeByName("R Dorsolateral PFC").GetCenter(cR)
+        self.assertLess(cL[0], cR[0])  # L seeded left of R (module's L=low-x convention)
+        print("TEST atlas ref=%.0f seeded=%d fallback=%d L.x=%.0f<R.x=%.0f" % (
+            ref, nSeed, nFall, cL[0], cR[0]))
+        self.delayDisplay("Atlas seed + reference passed")
