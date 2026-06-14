@@ -400,6 +400,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # so set the scene on every qMRML selector explicitly.
         self.ui.inputVolumeSelector.setMRMLScene(slicer.mrmlScene)
         self.ui.cerebellumRoiSelector.setMRMLScene(slicer.mrmlScene)
+        self.ui.atlasLabelmapSelector.setMRMLScene(slicer.mrmlScene)
 
         self.logic = SPECTBrainRenderLogic()
 
@@ -473,6 +474,8 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.createRegionScaffoldButton.connect("clicked(bool)", self.onCreateRegionScaffold)
         self.ui.quantifyRegionsButton.connect("clicked(bool)", self.onQuantifyRegions)
         self.ui.exportRegionTsvButton.connect("clicked(bool)", self.onExportRegionTsv)
+        self.ui.setReferenceFromAtlasButton.connect("clicked(bool)", self.onSetReferenceFromAtlas)
+        self.ui.seedRegionsFromAtlasButton.connect("clicked(bool)", self.onSeedRegionsFromAtlas)
         self.ui.regionTableWidget.connect("cellDoubleClicked(int,int)", self.onRegionRowDoubleClicked)
         self._regionRows = []
 
@@ -502,6 +505,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.exportSurfaceButton, self.ui.exportActiveButton,
             self.ui.createRegionScaffoldButton, self.ui.quantifyRegionsButton,
             self.ui.exportRegionTsvButton,
+            self.ui.setReferenceFromAtlasButton, self.ui.seedRegionsFromAtlasButton,
         ):
             w.setEnabled(hasVolume)
 
@@ -968,6 +972,64 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         msg += (" These are APPROXIMATE starting positions - drag each box onto its "
                 "true structure, then 'Quantify regions'. The cerebellum reference "
                 "ROI for '%s' is separate (use 'Create cerebellum ROI')." % REGION_REF_MEAN)
+        self.log(msg)
+
+    def onSetReferenceFromAtlas(self):
+        # #1: read a robust cerebellar reference from the warped atlas cerebellum
+        # labels into the existing 'Manual reference' field (clinician can override).
+        node = self.currentVolumeNode()
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        if node is None or atlas is None:
+            self.log("Select a volume and a warped atlas labelmap first.")
+            return
+        try:
+            ref = self.logic.cerebellarMaxFromAtlas(node, atlas)
+        except Exception as exc:
+            self.log("Atlas reference failed: %s" % exc)
+            return
+        if ref <= 0:
+            self.log("No cerebellum labels (95-120) found in the atlas - is it the "
+                     "AAL3 atlas warped into THIS patient's space?")
+            return
+        self.cerebellarMax = float(ref)
+        self._updatingFromCode = True
+        self.ui.manualReferenceSpinBox.value = self.cerebellarMax
+        self._updatingFromCode = False
+        self.refreshReferenceLabel()
+        self.log("Atlas cerebellar reference (robust max of labels 95-120) = %.1f "
+                 "counts -> 'Manual reference'. VERIFY it: a poorly registered atlas can "
+                 "land the cerebellum mask on a hot focus and inflate it - override the "
+                 "value (or place the 'R' box manually) if it looks wrong." % self.cerebellarMax)
+
+    def onSeedRegionsFromAtlas(self):
+        # #4: position each ticked region's Box ROI at its atlas centroid.
+        node = self.currentVolumeNode()
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        if node is None or atlas is None:
+            self.log("Select a volume and a warped atlas labelmap first.")
+            return
+        names = self._checkedRegionNames()
+        if not names:
+            self.log("No regions selected - tick at least one region in 'Regions to "
+                     "include', then 'Seed boxes from atlas'.")
+            return
+        if not self.ui.orientationConfirmedCheckBox.checked:
+            self.log("WARNING: orientation not confirmed - the seeded L/R sides follow "
+                     "the current display orientation.")
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            nSeed, nFall = self.logic.seedRegionRoisFromAtlas(node, atlas, names=names)
+        except Exception as exc:
+            self.log("Atlas seeding failed: %s" % exc)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        msg = "Seeded %d region Box ROI(s) at their atlas centroids" % nSeed
+        if nFall:
+            msg += (" (%d region(s) absent from the atlas fell back to the fixed "
+                    "scaffold position)" % nFall)
+        msg += (". STARTING positions from the warped atlas - drag each box to fine-tune, "
+                "then 'Quantify regions'.")
         self.log(msg)
 
     def onQuantifyRegions(self):

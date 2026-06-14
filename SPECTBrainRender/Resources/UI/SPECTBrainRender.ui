@@ -1245,6 +1245,58 @@
        </layout>
       </item>
       <item>
+       <layout class="QHBoxLayout" name="atlasModeLayout">
+        <item>
+         <widget class="QLabel" name="atlasLabel">
+          <property name="text">
+           <string>Warped atlas:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="qMRMLNodeComboBox" name="atlasLabelmapSelector">
+          <property name="nodeTypes">
+           <stringlist>
+            <string>vtkMRMLLabelMapVolumeNode</string>
+           </stringlist>
+          </property>
+          <property name="addEnabled">
+           <bool>false</bool>
+          </property>
+          <property name="removeEnabled">
+           <bool>false</bool>
+          </property>
+          <property name="noneEnabled">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>The AAL3 atlas warped into this patient's space (from the registration step). Used to seed region boxes and the cerebellar reference.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="setReferenceFromAtlasButton">
+          <property name="text">
+           <string>Set reference from atlas cerebellum</string>
+          </property>
+          <property name="toolTip">
+           <string>Read a robust cerebellar max from the warped atlas cerebellum labels into 'Manual reference'. Verify/override it - a poorly registered atlas can contaminate it.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="seedRegionsFromAtlasButton">
+          <property name="text">
+           <string>Seed boxes from atlas</string>
+          </property>
+          <property name="toolTip">
+           <string>Position each TICKED region's Box ROI at its atlas centroid (better starting points than the fixed scaffold). Regions absent from the atlas fall back to the fractional placement. Drag each box to fine-tune.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
        <layout class="QHBoxLayout" name="regionButtonLayout">
         <item>
          <widget class="QPushButton" name="createRegionScaffoldButton">
