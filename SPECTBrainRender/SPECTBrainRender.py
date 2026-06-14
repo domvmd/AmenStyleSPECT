@@ -184,6 +184,7 @@ def rowDisplayColor(row):
 #        display RAS frame the patient's LEFT is the low-x side (matches the
 #        Left/Right camera presets) - so confirm orientation before reading L/R.
 # Revised taxonomy (user, 2026-06-11): 27 base regions, EVERY one paired L/R = 54 ROIs.
+# 2026-06 (user): + Precuneus (posterior DMN hub, split out of Superior Parietal) = 28 base / 56 ROIs.
 REGION_SPECS = [
     # 1. Frontal lobe (7) - paired L/R
     ("Frontal Lobe", "Prefrontal Pole", True, "", 0.95, 0.45, 0.18),
@@ -206,9 +207,10 @@ REGION_SPECS = [
     ("Temporal Lobe", "Medial Temporal - Amygdala", True, "amygdala", 0.66, 0.28, 0.18),
     ("Temporal Lobe", "Medial Temporal - Hippocampus", True, "hippocampus", 0.50, 0.30, 0.18),
     ("Temporal Lobe", "Medial Temporal - Posterior", True, "parahippocampal gyrus", 0.38, 0.30, 0.18),
-    # 4. Parietal (2) - paired L/R
+    # 4. Parietal (3) - paired L/R
     ("Parietal Lobe", "Superior Parietal", True, "", 0.28, 0.82, 0.28),
     ("Parietal Lobe", "Inferior Parietal", True, "", 0.30, 0.62, 0.36),
+    ("Parietal Lobe", "Precuneus", True, "precuneus - posterior hub of the default mode network", 0.22, 0.72, 0.08),
     # 5. Occipital (2) - paired L/R
     ("Occipital Lobe", "Primary Visual Cortex", True, "calcarine", 0.08, 0.42, 0.12),
     ("Occipital Lobe", "Visual Association Cortex", True, "", 0.14, 0.52, 0.30),
@@ -294,7 +296,7 @@ ATLAS_STEM_TO_AMEN = {
     "Heschl": "Lateral Temporal - Middle", "Temporal_Sup": "Lateral Temporal - Middle",
     "Temporal_Mid": "Lateral Temporal - Middle",
     "Temporal_Inf": "Lateral Temporal - Posterior", "Fusiform": "Lateral Temporal - Posterior",
-    "Postcentral": "Superior Parietal", "Parietal_Sup": "Superior Parietal", "Precuneus": "Superior Parietal",
+    "Postcentral": "Superior Parietal", "Parietal_Sup": "Superior Parietal", "Precuneus": "Precuneus",
     "Parietal_Inf": "Inferior Parietal", "SupraMarginal": "Inferior Parietal", "Angular": "Inferior Parietal",
     "Calcarine": "Primary Visual Cortex",
     "Cuneus": "Visual Association Cortex", "Lingual": "Visual Association Cortex",
@@ -3175,14 +3177,15 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertEqual(groups["Frontal Lobe"], 14)    # 7 paired
         self.assertEqual(groups["Cingulate Gyrus"], 10)  # 5 paired
         self.assertEqual(groups["Temporal Lobe"], 12)    # 6 paired
-        self.assertEqual(groups["Parietal Lobe"], 4)     # 2 paired
+        self.assertEqual(groups["Parietal Lobe"], 6)     # 3 paired (incl. Precuneus / DMN)
         self.assertEqual(groups["Occipital Lobe"], 4)    # 2 paired
         self.assertEqual(groups["Subcortical"], 8)       # 4 paired
         self.assertEqual(groups["Cerebellum"], 2)        # 1 paired
-        self.assertEqual(len(AMEN_REGIONS), 54)  # 27 base regions x L/R
+        self.assertEqual(len(AMEN_REGIONS), 56)  # 28 base regions x L/R
         # all regions paired L/R; names unique
         self.assertTrue(all(r["side"] in ("L", "R") for r in AMEN_REGIONS))
-        self.assertEqual(len({r["base"] for r in AMEN_REGIONS}), 27)
+        self.assertEqual(len({r["base"] for r in AMEN_REGIONS}), 28)
+        self.assertIn("L Precuneus", AMEN_REGIONS_BY_NAME)  # DMN hub, its own region
         names = [r["name"] for r in AMEN_REGIONS]
         self.assertEqual(len(names), len(set(names)))
         self.assertIn("L Dorsolateral PFC", AMEN_REGIONS_BY_NAME)
@@ -3192,7 +3195,7 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         # clinical note carried through to both sides of the paired region
         self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["L Anterior Cingulate - Ventral"]["note"])
         self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["R Anterior Cingulate - Ventral"]["note"])
-        print(f"TEST schema regions={len(AMEN_REGIONS)} bases=27 groups={dict(groups)}")
+        print(f"TEST schema regions={len(AMEN_REGIONS)} bases=28 groups={dict(groups)}")
         self.delayDisplay("Region schema passed")
 
     def test_RegionQuantify(self):
@@ -3203,8 +3206,8 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         logic = SPECTBrainRenderLogic()
         vol = self._makePhantom()
         n = logic.createRegionRoiScaffold(vol)
-        self.assertEqual(n, 54)
-        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 54)
+        self.assertEqual(n, 56)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 56)
 
         rows, meta = logic.quantifyRegions(vol, None, 870.0,
                                            metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX)
