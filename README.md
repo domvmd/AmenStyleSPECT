@@ -9,9 +9,14 @@ Amen-style 3D renderings:
   spectrum (pink superior → violet inferior); a GPU volume render is also available.
 - **Active scan** — a blue wireframe brain plus the most-active tissue
   (hyperperfusion) rendered opaque red (≥ 85 %) → white (≥ 92 % of cerebellar max).
-- **Regional quantification** — a per-region table reading each of the Amen
-  regions as a % of the cerebellar reference, classified hypoactive / normal /
-  hyperactive, with left/right asymmetry flags and a TSV export.
+- **Regional quantification** — a per-region table reading each of the **56** Amen
+  regions (28 paired L/R, incl. the precuneus as a default-mode-network hub) as a % of
+  the cerebellar reference, classified hypoactive / normal / hyperactive, with left/right
+  asymmetry flags and a TSV export.
+- **Automatic atlas quantification** *(v0.7)* — register the SPECT to a bundled MNI
+  **HMPAO** template, warp the **AAL3** atlas into patient space, and read all 56 regions
+  from their exact anatomical masks in **one click** — with a registration-quality verdict
+  (PASS / REVIEW / FAIL) and a manual landmark rescue for atypical cases. No MRI required.
 
 All thresholds are a **percent of the Maximum Cerebellar Count** (relative,
 within-patient scaling). Bands: hyperactive > 80 %, normal 60–80 %, hypoactive < 60 %;
@@ -139,6 +144,23 @@ mode — open the module and click **Reload**.
    The negative grades are the *surface-scan* (hypoperfusion) read, the positive grades the
    *active-scan* (hyperperfusion) read. The TSV carries a signed `Grade` column.
 
+9. **Automatic atlas quantification** *(optional — replaces the manual box-dragging step)* —
+   in **Regional quantification**, click **Register atlas to this SPECT (auto)**: it registers
+   the scan to the bundled MNI HMPAO template, warps the **AAL3** atlas into the patient's space
+   (~30–90 s), auto-fills the cerebellar reference, and reports a **PASS / REVIEW / FAIL**
+   registration-quality verdict (containment, cerebellum/brain ratio, template-match NCC). Then
+   click **Quantify from atlas (exact masks)** to read every region from its precise atlas voxels —
+   the same table / report / TSV as the manual path, with no box-dragging. *Verify the auto-set
+   reference, and confirm orientation first.*
+   - On **REVIEW / FAIL**: rescue it — **Place patient landmarks** (6 named points appear at
+     approximate spots), drag each onto its true location (the **cerebellum** point has the most
+     leverage), then **Re-align atlas from landmarks**. If it still fails, fall back to the manual
+     **Create selected region ROIs** workflow — the verdict is telling you the registration can't
+     be trusted for this scan.
+   - **Seed boxes from atlas** positions the manual region boxes at their atlas centroids (better
+     starting points than the fixed scaffold) if you prefer the adjustable-box workflow.
+   The atlas and template are **bundled** with the extension — nothing is downloaded.
+
 The **Status / calibration log** prints the resolved reference and the absolute count
 value behind each percent threshold on every render, and the full regional table.
 
@@ -146,8 +168,28 @@ value behind each percent threshold on every render, and the full regional table
 `BrainMasked (Surface)` and `BrainMasked (Active)` (the two scans render from **separate**
 masked clones, each with its own volume-rendering display/property node, so they never
 overwrite each other), `BlueBrain` + `BlueNodes` (active wireframe), the `AmenSurface` model
-(the marching-cubes isosurface surface scan), and the named region Box ROIs under the
-*Amen Regions* folder. Your original volume is never modified.
+(the marching-cubes isosurface surface scan), the named region Box ROIs under the
+*Amen Regions* folder, and — for the atlas pipeline — the warped `AAL3 (in patient)` labelmap
+and the `Patient landmarks` fiducials. Your original volume is never modified.
+
+---
+
+## License & attribution
+
+This extension is free software under the **GNU General Public License v3** (see the bundled
+`LICENSE`). It redistributes two third-party assets under their own terms:
+
+- **AAL3 atlas** (`Resources/Atlas/AAL3v1.nii` + `AAL3v1.nii.txt`) — Automated Anatomical
+  Labelling atlas 3, GIN-IMN (Bordeaux), released as copyright freeware under the **GNU GPL**.
+  Cite: *Rolls, Huang, Lin, Feng & Joliot, "Automated anatomical labelling atlas 3," NeuroImage
+  2020;206:116189*; original AAL: *Tzourio-Mazoyer et al., NeuroImage 2002;15:273–289*.
+- **MNI HMPAO perfusion template** (`Resources/Atlas/SPECT_HMPAO_template.nii.gz`) — the Tc-99m
+  HMPAO SPECT template distributed with **SPM** (Statistical Parametric Mapping; GPL), converted
+  to NIfTI, used as the spatial-normalization target.
+
+> The **AAL3 → Amen-taxonomy region grouping is a draft clinical mapping** (e.g. Broca's = pars
+> opercularis only; the "Deep Limbic / Thalamic" region pools several small midbrain nuclei).
+> Review it against your own conventions before any interpretive use.
 
 ---
 
@@ -174,6 +216,7 @@ needed for the manual install above.
 ```
 AmenStyleSPECT/
   CMakeLists.txt                         extension metadata (for Extensions Index only)
+  LICENSE                                GNU GPL v3
   README.md                              this file
   package.sh                             build a distributable zip
   install_helper.py                      one-paste path registration for a new PC
@@ -184,8 +227,14 @@ AmenStyleSPECT/
       Icons/SPECTBrainRender.png
       UI/SPECTBrainRender.ui
       Presets/AmenColor.vp.json          reference copy of the clinic color preset
+      AAL3v1.nii.txt                     AAL3 region lookup (label -> name)
+      Atlas/AAL3v1.nii                   AAL3 atlas (MNI, GPL)
+      Atlas/SPECT_HMPAO_template.nii.gz  MNI HMPAO perfusion template (from SPM)
 ```
 
-**Version:** 0.6.0 (pre-release; surface + active renders with a marching-cubes isosurface
-surface and the Amen positional spectrum coloring, cerebellar reference, 6-view montage export,
-regional hypo/hyper quantification table). DICOM NM import and `CALIBRATION.md` are still to come.
+**Version:** 0.7.0 (open-source, GPL v3). Adds the **automatic AAL3 atlas pipeline**: in-module
+registration to a bundled MNI HMPAO template (no MRI), exact-mask regional quantification, a
+PASS/REVIEW/FAIL registration-QC verdict, landmark re-align rescue, and atlas-seeded ROIs +
+cerebellar reference. Builds on 0.6.0 (marching-cubes surface scan + Amen positional spectrum,
+active scan, cerebellar reference, 6-view montage export, the regional hypo/hyper table now at
+56 regions incl. the precuneus). DICOM NM import and `CALIBRATION.md` are still to come.
