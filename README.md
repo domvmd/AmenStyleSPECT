@@ -9,18 +9,22 @@ Amen-style 3D renderings:
   spectrum (pink superior → violet inferior); a GPU volume render is also available.
 - **Active scan** — a blue wireframe brain plus the most-active tissue
   (hyperperfusion) rendered opaque red (≥ 85 %) → white (≥ 92 % of cerebellar max).
-- **Regional quantification** — a per-region table reading each of the **56** Amen
-  regions (28 paired L/R, incl. the precuneus as a default-mode-network hub) as a % of
-  the cerebellar reference, classified hypoactive / normal / hyperactive, with left/right
-  asymmetry flags and a TSV export.
+- **Regional quantification** — a per-region table reading each of the **58** Amen
+  regions (29 paired L/R, incl. the precuneus as a default-mode-network hub and the
+  nucleus accumbens) as a % of the cerebellar reference, classified hypoactive / normal /
+  hyperactive, with an ordinal ±4 grade, left/right asymmetry flags and a TSV export. The
+  `% Ref` cell is tinted with the Amen 20-step "hot" color scale so the table reads like
+  the active render.
 - **Automatic atlas quantification** *(v0.7)* — register the SPECT to a bundled MNI
-  **HMPAO** template, warp the **AAL3** atlas into patient space, and read all 56 regions
+  **HMPAO** template, warp the **AAL3** atlas into patient space, and read all 58 regions
   from their exact anatomical masks in **one click** — with a registration-quality verdict
-  (PASS / REVIEW / FAIL) and a manual landmark rescue for atypical cases. No MRI required.
+  (PASS / REVIEW / FAIL) and a manual landmark rescue for atypical cases. The warped atlas
+  is **named** (hover any region in the slice views to see it) and toggles on/off over the
+  SPECT. No MRI required.
 
 All thresholds are a **percent of the Maximum Cerebellar Count** (relative,
-within-patient scaling). Bands: hyperactive > 80 %, normal 60–80 %, hypoactive < 60 %;
-surface dents at 55 %.
+within-patient scaling), following the Amen reading convention. Bands: hot/hyperactive
+≥ 85 %, normal 55–85 %, hypoactive < 55 %; surface dents at 55 %.
 
 > ⚠️ **Research / visualization aid only.** NOT FDA/CE-cleared and NOT for primary
 > diagnosis. It renders *relative* within-patient perfusion with fixed percent
@@ -112,7 +116,9 @@ mode — open the module and click **Reload**.
    Choose the region metric (mean / peak) and reference (% of cerebellar **max**, or % of the
    cerebellum-ROI **mean**), set the hypo / hyper / floor / asymmetry thresholds, and click
    **Quantify regions** (it reads whichever region ROIs are in the scene). The table sorts
-   most-hypoactive first, tints rows by class, shows each region's **Hot %** (the fraction of
+   most-hypoactive first, tints each region's **% Ref** cell with the Amen 20-step hot scale
+   (blue → green → yellow → red → white, so it matches the active render) and shades the
+   **Class / Grade** cells by severity, shows each region's **Hot %** (the fraction of
    the ROI above the hyper threshold), and flags left/right asymmetries; **double-click a row**
    to jump the slices to that region. **Export regional table (TSV)** writes `regional_all.tsv`
    and `regional_hypo_hyper.tsv` to the Views/export output folder.
@@ -132,29 +138,38 @@ mode — open the module and click **Reload**.
    default count of 3; if noise over-flags, raise the count). Turn Focal hyperactivity off to
    classify hyperactivity purely from the region mean/peak.
 
-   Each abnormal region is then given an **ordinal grade** (with cerebellum = 100 % ceiling):
-   **hyperperfusion +1 … +4** and **hypoperfusion −1 … −4**, shown in a **Grade** column and shaded
-   deep-blue (−4) → green (0) → deep-red (+4).
-   - **Hyper (+1…+4)** by the hot-voxel mean as a % of cerebellar max, using the active-scan
-     anchors: **+1** red (85–92 %), **+2** white (92–100 %), **+3** above ceiling (100–110 %),
-     **+4** (≥ 110 %). The *Grade +2 / white at* and *Grade +4 at* spin boxes set the boundaries.
-   - **Hypo (−1…−4)** by the region mean, stepping below the hypoactive threshold (55 %) by the
-     *Hypo grade step* (default 10 %): **−1** 45–55 %, **−2** 35–45 %, **−3** 25–35 %, **−4** < 25 %.
+   Each abnormal region is then given an **ordinal grade** — the **Amen 20-step color scale**
+   (each step = **5 %** of the cerebellar reference) read as signed deviation from the normal
+   window: **hyperperfusion +1 … +4** and **hypoperfusion −1 … −4**, shown in a **Grade** column
+   and shaded deep-blue (−4) → green (0) → deep-red (+4).
+   - **Hyper (+1…+4)** by the hot-voxel mean, stepping up from the 85 % hot line:
+     **+1** 85–90 %, **+2** 90–95 %, **+3** 95–100 %, **+4** ≥ 100 % (at/above the cerebellar
+     ceiling).
+   - **Hypo (−1…−4)** by the region mean, stepping down from the 55 % hypo line:
+     **−1** 50–55 %, **−2** 45–50 %, **−3** 40–45 %, **−4** < 40 %.
 
-   The negative grades are the *surface-scan* (hypoperfusion) read, the positive grades the
-   *active-scan* (hyperperfusion) read. The TSV carries a signed `Grade` column.
+   The single *Grade step (% per color)* spin box (default 5) sets the width of every step
+   (so it stays a true 20-step scale). The active-scan render's white point (92 %) is set
+   separately in the Active section and is independent of the grade ladder. The negative grades
+   are the *surface-scan* (hypoperfusion) read, the positive grades the *active-scan*
+   (hyperperfusion) read. The TSV carries a signed `Grade` column.
 
 9. **Automatic atlas quantification** *(optional — replaces the manual box-dragging step)* —
    in **Regional quantification**, click **Register atlas to this SPECT (auto)**: it registers
    the scan to the bundled MNI HMPAO template, warps the **AAL3** atlas into the patient's space
    (~30–90 s), auto-fills the cerebellar reference, and reports a **PASS / REVIEW / FAIL**
-   registration-quality verdict (containment, cerebellum/brain ratio, template-match NCC). Then
+   registration-quality verdict (containment, cerebellum/brain ratio, template-match NCC). The
+   warped atlas is laid over the SPECT as a **named** colored overlay — **hover any region in the
+   slice views** to read it in the Data Probe — and the **Show SPECT** / **Show atlas overlay**
+   checkboxes + **Atlas opacity** slider let you blend or isolate either layer. Then
    click **Quantify from atlas (exact masks)** to read every region from its precise atlas voxels —
    the same table / report / TSV as the manual path, with no box-dragging. *Verify the auto-set
    reference, and confirm orientation first.*
    - On **REVIEW / FAIL**: rescue it — **Place patient landmarks** (6 named points appear at
-     approximate spots), drag each onto its true location (the **cerebellum** point has the most
-     leverage), then **Re-align atlas from landmarks**. If it still fails, fall back to the manual
+     approximate spots, each carrying a placement hint), drag each onto its true location. Five are
+     silhouette **edges** (frontal/occipital poles, vertex, L/R temporal); the **cerebellum** point
+     is the **centre** of the bright cerebellar blob and has the most leverage. Then
+     **Re-align atlas from landmarks**. If it still fails, fall back to the manual
      **Create selected region ROIs** workflow — the verdict is telling you the registration can't
      be trusted for this scan.
    - **Seed boxes from atlas** positions the manual region boxes at their atlas centroids (better
@@ -170,7 +185,8 @@ masked clones, each with its own volume-rendering display/property node, so they
 overwrite each other), `BlueBrain` + `BlueNodes` (active wireframe), the `AmenSurface` model
 (the marching-cubes isosurface surface scan), the named region Box ROIs under the
 *Amen Regions* folder, and — for the atlas pipeline — the warped `AAL3 (in patient)` labelmap
-and the `Patient landmarks` fiducials. Your original volume is never modified.
+(with an `AAL3 region names` color table so it hover-labels each region) and the
+`Patient landmarks` fiducials. Your original volume is never modified.
 
 ---
 
@@ -232,9 +248,13 @@ AmenStyleSPECT/
       Atlas/SPECT_HMPAO_template.nii.gz  MNI HMPAO perfusion template (from SPM)
 ```
 
-**Version:** 0.7.0 (open-source, GPL v3). Adds the **automatic AAL3 atlas pipeline**: in-module
-registration to a bundled MNI HMPAO template (no MRI), exact-mask regional quantification, a
-PASS/REVIEW/FAIL registration-QC verdict, landmark re-align rescue, and atlas-seeded ROIs +
-cerebellar reference. Builds on 0.6.0 (marching-cubes surface scan + Amen positional spectrum,
-active scan, cerebellar reference, 6-view montage export, the regional hypo/hyper table now at
-56 regions incl. the precuneus). DICOM NM import and `CALIBRATION.md` are still to come.
+**Version:** 0.8.0 (open-source, GPL v3). Aligns the grading and taxonomy to the published Amen
+reading convention: the ordinal grade is now the **20-step / 5 %-per-color scale** (bands
+hypo < 55 %, normal 55–85 %, hot ≥ 85 %), the regional table's `% Ref` cell is tinted with the
+**Amen hot color LUT**, the **nucleus accumbens** is restored as its own region (**58 regions /
+29 paired**), the warped atlas now **hover-labels** each region and **toggles on/off** over the
+SPECT with an opacity slider, and the landmark-rescue points carry **placement hints**. Builds on
+0.7.0 (automatic AAL3 atlas pipeline: in-module registration to a bundled MNI HMPAO template,
+exact-mask quantification, PASS/REVIEW/FAIL QC, landmark rescue) and 0.6.0 (marching-cubes surface
+scan + Amen positional spectrum, active scan, cerebellar reference, 6-view montage export).
+DICOM NM import and `CALIBRATION.md` are still to come.

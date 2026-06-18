@@ -137,15 +137,17 @@ DEFAULT_ASYMMETRY_PCT = 15.0     # |L-R| above this % of their mean is flagged
 DEFAULT_MIN_HOT_VOXELS = 3
 DEFAULT_MIN_HOT_FRAC_PCT = 10.0
 
-# Ordinal perfusion grade (Amen-style), all as % of cerebellar max (100% ceiling).
-# HYPERperfusion (+1..+4), graded on the hot-voxel mean using the active-scan
-# red/white anchors:  +1 red (hyper threshold .. white), +2 white (white ..
-# ceiling), +3 above ceiling (100 .. top), +4 (>= top).
-DEFAULT_HYPER_WHITE_PCT = 92.0   # +2 onset = active-scan white point
-DEFAULT_HYPER_TOP_PCT = 110.0    # +4 onset (the +3 onset is the 100% ceiling)
-# HYPOperfusion (-1..-4), graded on the region mean stepping below the hypo
-# threshold by this much per level (-1 = hypo..-step, -2 = -step..-2step, ...).
-DEFAULT_HYPO_STEP_PCT = 10.0
+# Ordinal perfusion grade = the Amen step-20 color scale (each color = 5% of the
+# cerebellar-max reference, spanning 0-100%) re-expressed as SIGNED deviation
+# from the normal window [hypoPct, hyperPct]:
+#   HYPER +1..+4 steps UP from hyperPct on the hot-voxel mean,
+#   HYPO  -1..-4 steps DOWN from hypoPct on the region mean,  0 = normal.
+# At the default 55/85 anchors with a 5% step, +4 lands at the 100% cerebellar
+# ceiling and -4 below 40% - both caps clamped.
+DEFAULT_GRADE_STEP_PCT = 5.0
+# Active-scan VR render white point ("white = top 8%", Amen) - the 3D render
+# only; independent of the grade ladder above.
+DEFAULT_HYPER_WHITE_PCT = 92.0
 
 REGION_FOLDER_NAME = "Amen Regions"  # subject-hierarchy folder for the ROI scaffold
 
@@ -172,6 +174,53 @@ def rowDisplayColor(row):
     """Color for a region's ROI box and table cell, by ordinal grade."""
     return GRADE_COLORS.get(row.get("grade", 0), (0.7, 0.7, 0.7))
 
+
+# Amen active-scan "hot" color LUT: the step-20 scale (each color = 5% of the
+# cerebellar-max reference) running blue (low) -> green -> yellow -> orange ->
+# red -> white (high). Used to tint the table's "% Ref" cell so each region's
+# color matches the 3D active render. Stops anchored to the clinical lines:
+# green at the 55% normal floor, red onset at the 85% hot line, white at the
+# 100% ceiling. Tunable here (not in the GUI).
+ACTIVE_HOT_LUT_STOPS = [
+    (0.00, (0.16, 0.12, 0.62)),   # deep blue - least active
+    (0.30, (0.10, 0.45, 0.88)),   # blue
+    (0.45, (0.08, 0.72, 0.80)),   # cyan
+    (0.55, (0.16, 0.74, 0.30)),   # green    - normal floor
+    (0.70, (0.82, 0.86, 0.12)),   # yellow
+    (0.80, (0.98, 0.62, 0.06)),   # orange
+    (0.85, (0.92, 0.16, 0.12)),   # red      - hot onset
+    (0.95, (1.00, 0.34, 0.26)),   # bright red
+    (1.00, (1.00, 1.00, 1.00)),   # white    - cerebellar ceiling
+]
+ACTIVE_HOT_LUT_STEPS = 20  # 5% per color
+
+
+def _lerpStops(stops, t):
+    """Linear-interpolate an RGB triple from (fraction, rgb) stops at t in [0,1]."""
+    t = max(0.0, min(1.0, t))
+    for k in range(len(stops) - 1):
+        t0, c0 = stops[k]
+        t1, c1 = stops[k + 1]
+        if t <= t1:
+            f = 0.0 if t1 == t0 else (t - t0) / (t1 - t0)
+            return tuple(c0[j] + (c1[j] - c0[j]) * f for j in range(3))
+    return stops[-1][1]
+
+
+# Precompute the discrete 20-step LUT once, sampling each 5% band at its center.
+ACTIVE_HOT_LUT = [
+    _lerpStops(ACTIVE_HOT_LUT_STOPS, (s + 0.5) / ACTIVE_HOT_LUT_STEPS)
+    for s in range(ACTIVE_HOT_LUT_STEPS)
+]
+
+
+def hotLutColor(pct):
+    """RGB (0-1) for a region's perfusion as % of cerebellar max, snapped to the
+    20-step Amen hot scale (5% per color, 0-100%); >=100% reads white."""
+    band = 100.0 / ACTIVE_HOT_LUT_STEPS
+    step = max(0, min(ACTIVE_HOT_LUT_STEPS - 1, int(pct / band)))
+    return ACTIVE_HOT_LUT[step]
+
 # Canonical Amen-style region taxonomy. Each spec is
 #   (group, base name, paired?, clinical note, fy, fz, lat)
 # and expands to ONE midline region (paired=False) or TWO (L/R) regions.
@@ -185,6 +234,7 @@ def rowDisplayColor(row):
 #        Left/Right camera presets) - so confirm orientation before reading L/R.
 # Revised taxonomy (user, 2026-06-11): 27 base regions, EVERY one paired L/R = 54 ROIs.
 # 2026-06 (user): + Precuneus (posterior DMN hub, split out of Superior Parietal) = 28 base / 56 ROIs.
+# 2026-06 (user): + Nucleus Accumbens (ventral striatum, split out of Deep Limbic) = 29 base / 58 ROIs.
 REGION_SPECS = [
     # 1. Frontal lobe (7) - paired L/R
     ("Frontal Lobe", "Prefrontal Pole", True, "", 0.95, 0.45, 0.18),
@@ -214,8 +264,9 @@ REGION_SPECS = [
     # 5. Occipital (2) - paired L/R
     ("Occipital Lobe", "Primary Visual Cortex", True, "calcarine", 0.08, 0.42, 0.12),
     ("Occipital Lobe", "Visual Association Cortex", True, "", 0.14, 0.52, 0.30),
-    # 6. Subcortical (4) - paired L/R
+    # 6. Subcortical (5) - paired L/R
     ("Subcortical", "Basal Ganglia (Caudate/Putamen)", True, "", 0.55, 0.50, 0.18),
+    ("Subcortical", "Nucleus Accumbens", True, "ventral striatum - pleasure/reward/addiction; partial-volume-limited at SPECT resolution", 0.58, 0.55, 0.10),
     ("Subcortical", "Thalamus", True, "", 0.45, 0.52, 0.09),
     ("Subcortical", "Insular Cortex", True, "", 0.58, 0.45, 0.30),
     ("Subcortical", "Deep Limbic / Thalamic", True, "deep limbic system", 0.52, 0.42, 0.09),
@@ -261,6 +312,7 @@ AMEN_REGIONS_BY_NAME = {r["name"]: r for r in AMEN_REGIONS}
 CEREB_ATLAS_LABELS = frozenset(range(95, 121))  # AAL3 cerebellum lobules + vermis
 ATLAS_LUT_PATH = os.path.join(os.path.dirname(__file__), "Resources", "AAL3v1.nii.txt")
 ATLAS_IN_PATIENT_NAME = "AAL3 (in patient)"  # the warped atlas labelmap from registerAtlasToVolume
+ATLAS_COLOR_NODE_NAME = "AAL3 region names"  # color table that makes the labelmap hover-show region names
 
 # #3 landmark re-align: (name, template RAS) pairs - derived from the bundled
 # template/atlas brain extremes (poles/vertex/temporal) + AAL3 cerebellum centroid.
@@ -276,6 +328,20 @@ TEMPLATE_LANDMARKS = [
     ("L temporal", (-77.0, -13.9, -14.4)),
     ("R temporal", (76.0, -11.3, -14.7)),
 ]
+
+# Where the clinician drags each landmark on the patient SPECT. FIVE are
+# silhouette EXTREMES (the outermost tip of the brain in a direction); the
+# Cerebellum is the CENTROID of the cerebellar mass (a centre, NOT a tip) - the
+# point whose accuracy most drives registration quality. Shown as each point's
+# description + in the placement log + the button tooltip.
+LANDMARK_HINTS = {
+    "Frontal pole": "Most ANTERIOR tip of the frontal lobe, on the midline (front tip of the brain).",
+    "Occipital pole": "Most POSTERIOR tip of the occipital lobe, on the midline (back tip of the brain).",
+    "Vertex": "TOPMOST point of the cortex (crown), on the midline.",
+    "Cerebellum": "CENTRE of the cerebellar mass - the bright HMPAO blob low & behind, midline/vermis. A centroid, NOT the bottom tip.",
+    "L temporal": "Most LATERAL point of the patient's LEFT temporal lobe, lower third. Confirm L/R orientation first.",
+    "R temporal": "Most LATERAL point of the patient's RIGHT temporal lobe, lower third. Confirm L/R orientation first.",
+}
 
 ATLAS_STEM_TO_AMEN = {
     "Precentral": "Posterior Frontal", "Rolandic_Oper": "Posterior Frontal",
@@ -304,7 +370,8 @@ ATLAS_STEM_TO_AMEN = {
     "Occipital_Inf": "Visual Association Cortex",
     "Caudate": "Basal Ganglia (Caudate/Putamen)", "Putamen": "Basal Ganglia (Caudate/Putamen)",
     "Pallidum": "Basal Ganglia (Caudate/Putamen)",
-    "N_Acc": "Deep Limbic / Thalamic", "VTA": "Deep Limbic / Thalamic", "Red_N": "Deep Limbic / Thalamic",
+    "N_Acc": "Nucleus Accumbens",
+    "VTA": "Deep Limbic / Thalamic", "Red_N": "Deep Limbic / Thalamic",
 }
 ATLAS_PREFIX_TO_AMEN = [
     ("Thal_", "Thalamus"), ("Cerebellum_", "Cerebellum"), ("Vermis_", "Cerebellum"),
@@ -359,27 +426,36 @@ class SPECTBrainRender(ScriptedLoadableModule):
         self.parent.title = "SPECT Brain Render (Amen-style)"
         self.parent.categories = ["Nuclear Medicine"]
         self.parent.dependencies = []
-        self.parent.contributors = ["Dominic Velasco, MD (Brain SPECT Clinic)"]
+        self.parent.contributors = [
+            "Dominic Velasco, MD (Aethera Wellness Institute)",
+            "Claude (Anthropic) - code implementation",
+        ]
         self.parent.helpText = """
 <p><b>SPECT Brain Render</b> reproduces an Amen-style perfusion read from a
 reconstructed SPECT volume, using the Maximum Cerebellar Count as the 100%
 reference:</p>
 <ul>
 <li><b>Surface scan</b> &mdash; a solid shaded brain surface at the threshold
-(% of reference); hypoperfusion falls inward as dents / holes (a hole is below
-threshold, NOT zero perfusion). Choose the technique: a marching-cubes
-isosurface (recommended &mdash; closest to the Amen look) or the GPU volume
-render. Color it as a single sculpted tone or tint it by perfusion.</li>
+(default 55% of reference); hypoperfusion falls inward as dents / holes (a hole
+is below threshold, NOT zero perfusion). Choose the technique: a marching-cubes
+isosurface (default &mdash; closest to the Amen look) or the GPU volume render.
+Color it as a superior&rarr;inferior spectrum (default), a single sculpted tone,
+or tinted by perfusion.</li>
 <li><b>Active scan</b> &mdash; blue wireframe brain (anatomy you can see through)
-plus the most-active tissue (&ge;80% of reference) volume-rendered opaque
-red&rarr;pink&rarr;white.</li>
-<li><b>Regional quantification</b> &mdash; one named Box ROI per region; each
-region's mean / peak uptake is read as a % of the cerebellar reference and
-classified hypoactive / normal / hyperactive, with left/right asymmetry flags
-and a TSV export.</li>
+plus the most-active tissue volume-rendered opaque red (&ge;85% of reference)
+ramping to white (&ge;92%).</li>
+<li><b>Regional quantification</b> &mdash; read each region's mean / peak uptake
+as a % of the cerebellar reference, classified hypoactive / normal / hyperactive
+with focal-hot detection, an ordinal &plusmn;4 grade, left/right asymmetry flags
+and a TSV export. Two ways to define the 58 regions (29 paired L/R, incl. the
+nucleus accumbens): place named Box ROIs by hand, OR auto-register the bundled
+AAL3 atlas to the SPECT and read each region's exact voxel mask (hover the warped
+atlas in the slice views to see region names).</li>
 </ul>
-<p>Bands relative to cerebellar max: hyperactive &gt;80%, normal 60&ndash;80%,
-hypoactive &lt;60%.</p>
+<p>Bands relative to cerebellar max (Amen reading convention): hypoactive
+&lt;55%, normal 55&ndash;85%, hot/hyperactive &ge;85%. The &plusmn;4 grade is the
+Amen 20-step colour scale (5% of reference per step) read as signed deviation
+from the normal window.</p>
 """
         self.parent.acknowledgementText = """
 Visualization convention inspired by the Amen Clinics display style and ported
@@ -388,6 +464,8 @@ from the clinic's Slicer Python workflow. Research / visualization aid only
 within-patient perfusion with fixed percent thresholds; does NOT perform
 normative-database (z-score) statistics. SPECT has no intrinsic L/R landmark
 &mdash; confirm orientation on every scan before reading laterality.
+Bundled atlas-driven parcellation uses the AAL3 atlas (Rolls et al., NeuroImage
+2020; GPL) warped through an SPM HMPAO perfusion template.
 """
 
 
@@ -498,6 +576,9 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.setReferenceFromAtlasButton.connect("clicked(bool)", self.onSetReferenceFromAtlas)
         self.ui.seedRegionsFromAtlasButton.connect("clicked(bool)", self.onSeedRegionsFromAtlas)
         self.ui.quantifyFromAtlasButton.connect("clicked(bool)", self.onQuantifyFromAtlas)
+        self.ui.showSpectCheckBox.connect("toggled(bool)", self.onAtlasOverlayChanged)
+        self.ui.showAtlasCheckBox.connect("toggled(bool)", self.onAtlasOverlayChanged)
+        self.ui.atlasOpacitySlider.connect("valueChanged(double)", self.onAtlasOverlayChanged)
         self.ui.regionTableWidget.connect("cellDoubleClicked(int,int)", self.onRegionRowDoubleClicked)
         self._regionRows = []
 
@@ -966,9 +1047,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             focalHyper=self.ui.focalHyperCheckBox.checked,
             minHotVoxels=int(self.ui.minHotVoxelsSpinBox.value),
             minHotFrac=self.ui.minHotFracSpinBox.value,
-            hyperWhitePct=self.ui.hyperWhiteSpinBox.value,
-            hyperTopPct=self.ui.hyperTopSpinBox.value,
-            hypoStepPct=self.ui.hypoStepSpinBox.value,
+            gradeStepPct=self.ui.gradeStepSpinBox.value,
         )
 
     def onCreateRegionScaffold(self):
@@ -1019,6 +1098,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         finally:
             qt.QApplication.restoreOverrideCursor()
         self.ui.atlasLabelmapSelector.setCurrentNode(warpedAtlas)
+        self.applyAtlasOverlay(fit=True)  # SPECT + semi-transparent atlas, both visible
         # auto-fill the cerebellar reference from the freshly warped atlas (verify it)
         refNote = ""
         try:
@@ -1059,11 +1139,15 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             slicer.modules.markups.logic().JumpSlicesToNthPointInMarkup(lm.GetID(), 0, True)
         except Exception:
             pass
-        self.log("Dropped %d landmark points (%s) at APPROXIMATE positions under '%s'. "
-                 "Drag each onto its TRUE location in the slice views, then "
-                 "'Re-align atlas from landmarks'." % (
-                     lm.GetNumberOfControlPoints(),
-                     ", ".join(n for n, _ in TEMPLATE_LANDMARKS), LANDMARK_NODE_NAME))
+        hintLines = "\n".join("  - %s: %s" % (n, LANDMARK_HINTS[n])
+                              for n, _ in TEMPLATE_LANDMARKS)
+        self.log("Dropped %d landmark points at APPROXIMATE positions under '%s'. Drag "
+                 "EACH onto its TRUE location, checking all 3 slice views, then click "
+                 "'Re-align atlas from landmarks'.\n%s\nNOTE: five points are silhouette "
+                 "EDGES; the Cerebellum is the CENTRE of the bright cerebellar blob (not "
+                 "its tip) and matters most. Confirm L/R orientation before the temporal "
+                 "points." % (lm.GetNumberOfControlPoints(), LANDMARK_NODE_NAME, hintLines),
+                 replace=True)
 
     def onLandmarkRealign(self):
         # #3: fit a transform from the placed landmarks and re-warp the atlas.
@@ -1088,6 +1172,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         finally:
             qt.QApplication.restoreOverrideCursor()
         self.ui.atlasLabelmapSelector.setCurrentNode(warpedAtlas)
+        self.applyAtlasOverlay(fit=True)  # SPECT + semi-transparent atlas, both visible
         refNote = ""
         try:
             ref = self.logic.cerebellarMaxFromAtlas(node, warpedAtlas)
@@ -1170,6 +1255,35 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "then 'Quantify regions'.")
         self.log(msg)
 
+    def applyAtlasOverlay(self, fit=False):
+        """Lay out the slice views as SPECT (background) + warped atlas (label
+        overlay), honoring the Show SPECT / Show atlas toggles + opacity slider.
+        Fixes the 'SPECT disappears under the atlas' problem and lets either layer
+        be toggled independently. GUI-only (needs the layout manager)."""
+        lm = slicer.app.layoutManager()
+        if lm is None:
+            return
+        spect = self.currentVolumeNode()
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        showSpect = self.ui.showSpectCheckBox.checked
+        showAtlas = self.ui.showAtlasCheckBox.checked
+        opacity = self.ui.atlasOpacitySlider.value
+        bgId = spect.GetID() if (spect and showSpect) else None
+        lblId = atlas.GetID() if (atlas and showAtlas) else None
+        for name in lm.sliceViewNames():
+            sw = lm.sliceWidget(name)
+            if sw is None:
+                continue
+            comp = sw.sliceLogic().GetSliceCompositeNode()
+            comp.SetBackgroundVolumeID(bgId)
+            comp.SetLabelVolumeID(lblId)
+            comp.SetLabelOpacity(opacity if showAtlas else 0.0)
+            if fit:
+                sw.sliceLogic().FitSliceToAll()
+
+    def onAtlasOverlayChanged(self, *_):
+        self.applyAtlasOverlay()
+
     def onQuantifyFromAtlas(self):
         # #2: fully automatic exact-mask quantification from the warped atlas.
         node = self.currentVolumeNode()
@@ -1177,6 +1291,8 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if node is None or atlas is None:
             self.log("Select a volume and a warped atlas labelmap first.")
             return
+        self.logic.nameAtlasLabelmap(atlas)  # ensure hover-show names (also for pre-named labelmaps)
+        self.applyAtlasOverlay()  # ensure SPECT + atlas both visible per the toggles
         if not self.ui.orientationConfirmedCheckBox.checked:
             self.log("WARNING: orientation not confirmed - do not read laterality yet.")
         if self.cerebellarMax <= 0:
@@ -1268,6 +1384,13 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 it.setData(qt.Qt.UserRole, row["name"])
                 if c in (2, 3, 5, 6):
                     it.setTextAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+                if c == 2:  # % Ref: Amen 20-step hot LUT (magnitude) - matches the render
+                    lr, lg, lb = hotLutColor(row["pct"])
+                    swatch = qt.QColor(int(lr * 255), int(lg * 255), int(lb * 255))
+                    swatch.setAlpha(225)
+                    it.setBackground(swatch)
+                    lum = 0.299 * lr + 0.587 * lg + 0.114 * lb
+                    it.setForeground(qt.QColor(0, 0, 0) if lum > 0.55 else qt.QColor(255, 255, 255))
                 if c in (4, 5):
                     it.setBackground(bg)
                 if c == 3 and row["focal"]:
@@ -2171,6 +2294,61 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                     robustMax=robustMax, refRatio=refRatio, nBrain=nBrain,
                     flags=flags, verdict=verdict)
 
+    def atlasColorTableNode(self, lutPath=ATLAS_LUT_PATH):
+        """Build (once, then reuse) a color table mapping each AAL3 label value to
+        its region NAME ('<AAL name> -> <Amen region>') and a distinct color, so
+        the Data Probe shows the region name when hovering over the warped atlas
+        labelmap instead of just a color/index. Returns the color node (or None)."""
+        import colorsys
+        existing = slicer.mrmlScene.GetFirstNodeByName(ATLAS_COLOR_NODE_NAME)
+        if existing and existing.IsA("vtkMRMLColorTableNode"):
+            return existing
+        names, maxLabel = {}, 0
+        try:
+            with open(lutPath) as fh:
+                for line in fh:
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[0].isdigit():
+                        lab, aal = int(parts[0]), parts[1]
+                        base, side = _atlasAmenOf(aal)
+                        if base:
+                            amen = base if side == "M" else "%s %s" % (side, base)
+                            names[lab] = "%s -> %s" % (aal, amen)
+                        else:
+                            names[lab] = aal
+                        maxLabel = max(maxLabel, lab)
+        except OSError:
+            return None
+        if not names:
+            return None
+        ct = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLColorTableNode", ATLAS_COLOR_NODE_NAME)
+        ct.SetTypeToUser()
+        ct.HideFromEditorsOff()
+        ct.SetNumberOfColors(maxLabel + 1)
+        ct.SetColor(0, "background", 0.0, 0.0, 0.0, 0.0)
+        for lab in range(1, maxLabel + 1):
+            if lab in names:
+                h = (lab * 0.6180339887498949) % 1.0   # golden-ratio hue spread = distinct colors
+                r, g, b = colorsys.hsv_to_rgb(h, 0.55, 0.95)
+                ct.SetColor(lab, names[lab], float(r), float(g), float(b), 1.0)
+            else:
+                ct.SetColor(lab, "(%d)" % lab, 0.0, 0.0, 0.0, 0.0)
+        return ct
+
+    def nameAtlasLabelmap(self, labelmapNode):
+        """Attach the named AAL3 color table + a display node to a warped atlas
+        labelmap so hovering over it shows the region name in the Data Probe."""
+        if labelmapNode is None:
+            return None
+        ct = self.atlasColorTableNode()
+        if ct is None:
+            return None
+        labelmapNode.CreateDefaultDisplayNodes()
+        dn = labelmapNode.GetDisplayNode()
+        if dn:
+            dn.SetAndObserveColorNodeID(ct.GetID())
+        return ct
+
     def registerAtlasToVolume(self, volumeNode, deformable=True):
         """#2b: register this SPECT to the bundled MNI HMPAO template and warp the
         bundled AAL3 atlas into the patient's space - one call, no external script.
@@ -2225,6 +2403,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         finally:
             for n in cleanup:
                 slicer.mrmlScene.RemoveNode(n)
+        self.nameAtlasLabelmap(warpedAtlas)  # hover-show region names in the Data Probe
         return warpedAtlas, qc
 
     def createPatientLandmarkScaffold(self, volumeNode):
@@ -2247,9 +2426,10 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             node.RemoveAllControlPoints()
         else:
             node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", LANDMARK_NODE_NAME)
-        for name, _ in TEMPLATE_LANDMARKS:
+        for i, (name, _) in enumerate(TEMPLATE_LANDMARKS):
             p = pos[name]
             node.AddControlPoint(float(p[0]), float(p[1]), float(p[2]), name)
+            node.SetNthControlPointDescription(i, LANDMARK_HINTS.get(name, ""))
         return node
 
     def landmarkRealignAtlas(self, volumeNode, patientLandmarksNode, transformType="Affine"):
@@ -2325,6 +2505,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         finally:
             for nd in cleanup:
                 slicer.mrmlScene.RemoveNode(nd)
+        self.nameAtlasLabelmap(warpedAtlas)  # hover-show region names in the Data Probe
         return warpedAtlas, qc, rms
 
     def seedRegionRoisFromAtlas(self, volumeNode, atlasLabelmapNode, names=None, sizeScale=1.0):
@@ -2397,9 +2578,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                                  focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
                                  minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
                                  maskToBrain=True, islandPct=30.0, islandErode=2,
-                                 hyperWhitePct=DEFAULT_HYPER_WHITE_PCT,
-                                 hyperTopPct=DEFAULT_HYPER_TOP_PCT,
-                                 hypoStepPct=DEFAULT_HYPO_STEP_PCT):
+                                 gradeStepPct=DEFAULT_GRADE_STEP_PCT):
         """Exact-mask regional quantification (#2): pool each Amen region's precise
         AAL3 voxels from the warped atlas (no Box ROIs) and classify with the same
         bands/grading as quantifyRegions. Returns (rows, meta) in the SAME shape, so
@@ -2459,9 +2638,10 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             grade = 0
             if cls == "Hyperactive":
                 hv = hotMeanPct if hotMeanPct is not None else pct
-                grade = 1 + (hv >= hyperWhitePct) + (hv >= 100.0) + (hv >= hyperTopPct)
+                steps = int((hv - hyperPct) / gradeStepPct) if gradeStepPct > 0 else 0
+                grade = min(4, 1 + max(0, steps))
             elif cls == "Hypoactive":
-                steps = int((hypoPct - pct) / hypoStepPct) if hypoStepPct > 0 else 0
+                steps = int((hypoPct - pct) / gradeStepPct) if gradeStepPct > 0 else 0
                 grade = -min(4, 1 + max(0, steps))
             name = base if side == "M" else "%s %s" % (side, base)
             exact = AMEN_REGIONS_BY_NAME.get(name)
@@ -2494,7 +2674,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                     hypoPct=hypoPct, hyperPct=hyperPct, asymmetryPct=asymmetryPct,
                     focalHyper=focalHyper, minHotVoxels=minHotVoxels, minHotFrac=minHotFrac,
                     hotThreshold=hotThreshold, masked=masked,
-                    hyperWhitePct=hyperWhitePct, hyperTopPct=hyperTopPct, hypoStepPct=hypoStepPct,
+                    gradeStepPct=gradeStepPct,
                     nHypo=sum(1 for r in rows if r["cls"] == "Hypoactive"),
                     nHyper=sum(1 for r in rows if r["cls"] == "Hyperactive"),
                     gradeCounts={g: sum(1 for r in rows if r["grade"] == g)
@@ -2512,9 +2692,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                         focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
                         minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
                         maskToBrain=True, islandPct=30.0, islandErode=2,
-                        hyperWhitePct=DEFAULT_HYPER_WHITE_PCT,
-                        hyperTopPct=DEFAULT_HYPER_TOP_PCT,
-                        hypoStepPct=DEFAULT_HYPO_STEP_PCT):
+                        gradeStepPct=DEFAULT_GRADE_STEP_PCT):
         """Quantify every Markups ROI (except the cerebellum reference) against
         the cerebellar reference and classify hypo/normal/hyper. Returns
         (rows, meta). Each row dict: name, group, side, base, note, value, pct,
@@ -2592,14 +2770,16 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 cls = "Hypoactive"
             else:
                 cls = "Normal"
-            # Ordinal grade: hyper +1..+4 (hot-voxel mean: red/white/ceiling/top),
-            # hypo -1..-4 (region mean stepping below the hypo threshold), normal 0.
+            # Ordinal grade = Amen step-20 scale (gradeStepPct % per color): hyper
+            # +1..+4 stepping up from hyperPct on the hot-voxel mean, hypo -1..-4
+            # stepping down from hypoPct on the region mean, normal 0.
             grade = 0
             if cls == "Hyperactive":
                 hv = hotMeanPct if hotMeanPct is not None else pct
-                grade = 1 + (hv >= hyperWhitePct) + (hv >= 100.0) + (hv >= hyperTopPct)
+                steps = int((hv - hyperPct) / gradeStepPct) if gradeStepPct > 0 else 0
+                grade = min(4, 1 + max(0, steps))
             elif cls == "Hypoactive":
-                steps = int((hypoPct - pct) / hypoStepPct) if hypoStepPct > 0 else 0
+                steps = int((hypoPct - pct) / gradeStepPct) if gradeStepPct > 0 else 0
                 grade = -min(4, 1 + max(0, steps))
             schema = AMEN_REGIONS_BY_NAME.get(nm)
             rows.append(dict(
@@ -2633,7 +2813,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                     hypoPct=hypoPct, hyperPct=hyperPct, asymmetryPct=asymmetryPct,
                     focalHyper=focalHyper, minHotVoxels=minHotVoxels, minHotFrac=minHotFrac,
                     hotThreshold=hotThreshold, masked=masked,
-                    hyperWhitePct=hyperWhitePct, hyperTopPct=hyperTopPct, hypoStepPct=hypoStepPct,
+                    gradeStepPct=gradeStepPct,
                     nHypo=sum(1 for r in rows if r["cls"] == "Hypoactive"),
                     nHyper=sum(1 for r in rows if r["cls"] == "Hyperactive"),
                     gradeCounts={g: sum(1 for r in rows if r["grade"] == g)
@@ -2697,11 +2877,11 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 meta["hypoPct"], meta["hyperPct"],
                 "" if meta["focalHyper"] else "[focal OFF] ",
                 meta["minHotVoxels"], meta["minHotFrac"], meta["hyperPct"], meta["hotThreshold"]),
-            "Ordinal grade (%% of cereb max, 100%% ceiling): hyper +1 red %.0f-%.0f%%, "
-            "+2 white %.0f-100%%, +3 100-%.0f%%, +4 >= %.0f%%;  hypo -1..-4 step %.0f%% "
-            "below %.0f%%." % (
-                meta["hyperPct"], meta["hyperWhitePct"], meta["hyperWhitePct"],
-                meta["hyperTopPct"], meta["hyperTopPct"], meta["hypoStepPct"], meta["hypoPct"]),
+            "Ordinal grade = Amen 20-step scale (%.0f%% per color): hyper +1..+4 step up "
+            "from %.0f%%, hypo -1..-4 step down from %.0f%% (+4 reaches the 100%% ceiling, "
+            "-4 below %.0f%%)." % (
+                meta["gradeStepPct"], meta["hyperPct"], meta["hypoPct"],
+                meta["hypoPct"] - 3 * meta["gradeStepPct"]),
             "%-44s %8s  %6s  %11s   %-14s %5s %6s" % (
                 "Region", valhdr, "%Ref", "Hot%(vox)", "Class", "Grade", "L-R%"),
             "-" * 104,
@@ -2923,6 +3103,7 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.test_OrdinalGrade()
         self.test_AtlasSeedAndReference()
         self.test_AtlasRegistrationAssets()
+        self.test_AtlasColorTable()
 
     def _makePhantom(self):
         """Ellipsoid 'brain' (~600), a cerebellum-like hot region posterior-inferior
@@ -3179,13 +3360,18 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertEqual(groups["Temporal Lobe"], 12)    # 6 paired
         self.assertEqual(groups["Parietal Lobe"], 6)     # 3 paired (incl. Precuneus / DMN)
         self.assertEqual(groups["Occipital Lobe"], 4)    # 2 paired
-        self.assertEqual(groups["Subcortical"], 8)       # 4 paired
+        self.assertEqual(groups["Subcortical"], 10)      # 5 paired (incl. Nucleus Accumbens)
         self.assertEqual(groups["Cerebellum"], 2)        # 1 paired
-        self.assertEqual(len(AMEN_REGIONS), 56)  # 28 base regions x L/R
+        self.assertEqual(len(AMEN_REGIONS), 58)  # 29 base regions x L/R
         # all regions paired L/R; names unique
         self.assertTrue(all(r["side"] in ("L", "R") for r in AMEN_REGIONS))
-        self.assertEqual(len({r["base"] for r in AMEN_REGIONS}), 28)
+        self.assertEqual(len({r["base"] for r in AMEN_REGIONS}), 29)
         self.assertIn("L Precuneus", AMEN_REGIONS_BY_NAME)  # DMN hub, its own region
+        self.assertIn("L Nucleus Accumbens", AMEN_REGIONS_BY_NAME)  # ventral striatum, its own region
+        self.assertIn("R Nucleus Accumbens", AMEN_REGIONS_BY_NAME)
+        # AAL3 N_Acc (labels 157/158) routes to its own region, not the deep-limbic bucket
+        self.assertEqual(_atlasAmenOf("N_Acc_L"), ("Nucleus Accumbens", "L"))
+        self.assertEqual(_atlasAmenOf("N_Acc_R"), ("Nucleus Accumbens", "R"))
         names = [r["name"] for r in AMEN_REGIONS]
         self.assertEqual(len(names), len(set(names)))
         self.assertIn("L Dorsolateral PFC", AMEN_REGIONS_BY_NAME)
@@ -3195,7 +3381,7 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         # clinical note carried through to both sides of the paired region
         self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["L Anterior Cingulate - Ventral"]["note"])
         self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["R Anterior Cingulate - Ventral"]["note"])
-        print(f"TEST schema regions={len(AMEN_REGIONS)} bases=28 groups={dict(groups)}")
+        print(f"TEST schema regions={len(AMEN_REGIONS)} bases=29 groups={dict(groups)}")
         self.delayDisplay("Region schema passed")
 
     def test_RegionQuantify(self):
@@ -3206,8 +3392,8 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         logic = SPECTBrainRenderLogic()
         vol = self._makePhantom()
         n = logic.createRegionRoiScaffold(vol)
-        self.assertEqual(n, 56)
-        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 56)
+        self.assertEqual(n, 58)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 58)
 
         rows, meta = logic.quantifyRegions(vol, None, 870.0,
                                            metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX)
@@ -3358,14 +3544,15 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         arr = slicer.util.arrayFromVolume(vol)  # (k, j, i)
         arr[:] = 0.0  # blank canvas: each blob is isolated, surrounded by background
         # uniform blobs at known % of 870 -> known grades. (k, j, i) cubes.
-        blobs = {  # name: (value, (k0, j0, i0))
-            "+1 red": (770.0, (8, 8, 8)),       # 88.5% -> +1
-            "+2 white": (835.0, (8, 8, 20)),    # 96.0% -> +2
-            "+3 ceiling": (915.0, (8, 8, 32)),  # 105.2% -> +3
-            "+4 top": (1010.0, (8, 8, 44)),     # 116.1% -> +4
-            "-1 mild": (435.0, (8, 20, 8)),     # 50.0% -> -1
-            "-4 severe": (174.0, (8, 20, 20)),  # 20.0% -> -4
-            "normal": (600.0, (8, 20, 32)),     # 69.0% -> 0
+        blobs = {  # name: (value, (k0, j0, i0)); pct = value/870*100, 5%-per-grade
+            "+1 red": (757.0, (8, 8, 8)),        # 87.0% -> +1  [85,90)
+            "+2 orange": (800.0, (8, 8, 20)),    # 92.0% -> +2  [90,95)
+            "+3 deepred": (844.0, (8, 8, 32)),   # 97.0% -> +3  [95,100)
+            "+4 ceiling": (1131.0, (8, 8, 44)),  # 130.0% -> +4 (>=100, capped)
+            "-1 mild": (452.0, (8, 20, 8)),      # 52.0% -> -1  [50,55)
+            "-2 mild": (409.0, (8, 20, 20)),     # 47.0% -> -2  [45,50)
+            "-4 severe": (174.0, (8, 20, 32)),   # 20.0% -> -4  (<40, capped)
+            "normal": (609.0, (8, 20, 44)),      # 70.0% -> 0   [55,85)
         }
         i2r = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(i2r)
         for name, (value, (k0, j0, i0)) in blobs.items():
@@ -3379,22 +3566,29 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         rows, meta = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False)
         by = {r["name"]: r for r in rows}
         self.assertEqual(by["+1 red"]["grade"], 1)
-        self.assertEqual(by["+2 white"]["grade"], 2)
-        self.assertEqual(by["+3 ceiling"]["grade"], 3)
-        self.assertEqual(by["+4 top"]["grade"], 4)
+        self.assertEqual(by["+2 orange"]["grade"], 2)
+        self.assertEqual(by["+3 deepred"]["grade"], 3)
+        self.assertEqual(by["+4 ceiling"]["grade"], 4)
         self.assertEqual(by["-1 mild"]["grade"], -1)
+        self.assertEqual(by["-2 mild"]["grade"], -2)
         self.assertEqual(by["-4 severe"]["grade"], -4)
         self.assertEqual(by["normal"]["grade"], 0)
         self.assertEqual(by["normal"]["cls"], "Normal")
         gc = meta["gradeCounts"]
-        self.assertEqual([gc[g] for g in (-4, -1, 1, 2, 3, 4)], [1, 1, 1, 1, 1, 1])
+        self.assertEqual([gc[g] for g in (-4, -2, -1, 1, 2, 3, 4)], [1, 1, 1, 1, 1, 1, 1])
         self.assertEqual(gradeLabel(2), "+2")
         self.assertEqual(gradeLabel(-3), "-3")
         self.assertEqual(gradeLabel(0), "0")
-        print("TEST grade +1=%d +2=%d +3=%d +4=%d -1=%d -4=%d normal=%d" % (
-            by["+1 red"]["grade"], by["+2 white"]["grade"], by["+3 ceiling"]["grade"],
-            by["+4 top"]["grade"], by["-1 mild"]["grade"], by["-4 severe"]["grade"],
-            by["normal"]["grade"]))
+        # 20-step magnitude LUT: cold reads blue (B>R), hot reads red/white (R>B)
+        self.assertEqual(len(ACTIVE_HOT_LUT), 20)
+        cold = hotLutColor(by["-4 severe"]["pct"])   # ~20% -> blue end
+        hot = hotLutColor(by["+3 deepred"]["pct"])   # ~97% -> red/white end
+        self.assertGreater(cold[2], cold[0])         # blue > red when cold
+        self.assertGreater(hot[0], hot[2])           # red > blue when hot
+        print("TEST grade +1=%d +2=%d +3=%d +4=%d -1=%d -2=%d -4=%d normal=%d" % (
+            by["+1 red"]["grade"], by["+2 orange"]["grade"], by["+3 deepred"]["grade"],
+            by["+4 ceiling"]["grade"], by["-1 mild"]["grade"], by["-2 mild"]["grade"],
+            by["-4 severe"]["grade"], by["normal"]["grade"]))
         self.delayDisplay("Ordinal grade passed")
 
     def test_AtlasSeedAndReference(self):
@@ -3509,3 +3703,30 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertLess(cpt[1], front[1])   # cerebellum posterior to frontal pole (lower A)
         print("TEST landmarks n=%d cereb.A=%.0f<front.A=%.0f" % (len(labels), cpt[1], front[1]))
         self.delayDisplay("Atlas assets + QC + landmarks passed")
+
+    def test_AtlasColorTable(self):
+        """The warped atlas labelmap gets a NAMED color table so the Data Probe
+        shows the region (AAL name -> Amen region) on hover, not just a color."""
+        self.delayDisplay("Atlas labelmap region names (Data Probe)")
+        import numpy as np
+        slicer.mrmlScene.Clear()
+        logic = SPECTBrainRenderLogic()
+        ct = logic.atlasColorTableNode()
+        self.assertIsNotNone(ct)
+        self.assertTrue(ct.IsA("vtkMRMLColorTableNode"))
+        self.assertGreaterEqual(ct.GetNumberOfColors(), 159)  # AAL3 N_Acc_R = 158
+        # each entry names the AAL anatomical region AND its Amen mapping
+        self.assertIn("N_Acc_L", ct.GetColorName(157))
+        self.assertIn("Nucleus Accumbens", ct.GetColorName(157))
+        self.assertIn("Caudate_L", ct.GetColorName(75))
+        self.assertIn("Basal Ganglia", ct.GetColorName(75))
+        # built once, reused (not duplicated)
+        self.assertEqual(logic.atlasColorTableNode().GetID(), ct.GetID())
+        # attaching wires the color node into the labelmap's display node
+        lab = np.zeros((6, 6, 6), dtype=np.int16); lab[2:4, 2:4, 2:4] = 157
+        lm = slicer.util.addVolumeFromArray(lab, name="warpDummy",
+                                            nodeClassName="vtkMRMLLabelMapVolumeNode")
+        logic.nameAtlasLabelmap(lm)
+        self.assertEqual(lm.GetDisplayNode().GetColorNodeID(), ct.GetID())
+        print("TEST atlasColors n=%d L157='%s'" % (ct.GetNumberOfColors(), ct.GetColorName(157)))
+        self.delayDisplay("Atlas labelmap names passed")

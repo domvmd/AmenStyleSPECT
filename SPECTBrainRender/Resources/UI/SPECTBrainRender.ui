@@ -1095,72 +1095,14 @@
          </widget>
         </item>
         <item row="9" column="0">
-         <widget class="QLabel" name="hyperWhiteLabel">
+         <widget class="QLabel" name="gradeStepLabel">
           <property name="text">
-           <string>Grade +2 / white at (% of max):</string>
+           <string>Grade step (% per color):</string>
           </property>
          </widget>
         </item>
         <item row="9" column="1">
-         <widget class="QDoubleSpinBox" name="hyperWhiteSpinBox">
-          <property name="decimals">
-           <number>0</number>
-          </property>
-          <property name="minimum">
-           <double>50.0</double>
-          </property>
-          <property name="maximum">
-           <double>150.0</double>
-          </property>
-          <property name="singleStep">
-           <double>1.0</double>
-          </property>
-          <property name="value">
-           <double>92.0</double>
-          </property>
-          <property name="toolTip">
-           <string>Hyperactive grade: +1 = hot-voxel mean from the hyper threshold up to here (red); +2 = here to the 100% ceiling (white); +3 = ceiling to the +4 cut; +4 = at/above it.</string>
-          </property>
-         </widget>
-        </item>
-        <item row="10" column="0">
-         <widget class="QLabel" name="hyperTopLabel">
-          <property name="text">
-           <string>Grade +4 at (% of max):</string>
-          </property>
-         </widget>
-        </item>
-        <item row="10" column="1">
-         <widget class="QDoubleSpinBox" name="hyperTopSpinBox">
-          <property name="decimals">
-           <number>0</number>
-          </property>
-          <property name="minimum">
-           <double>100.0</double>
-          </property>
-          <property name="maximum">
-           <double>400.0</double>
-          </property>
-          <property name="singleStep">
-           <double>1.0</double>
-          </property>
-          <property name="value">
-           <double>110.0</double>
-          </property>
-          <property name="toolTip">
-           <string>Hyperactive regions whose hot-voxel mean reaches this % of cerebellar max are graded +4 (the most severe).</string>
-          </property>
-         </widget>
-        </item>
-        <item row="11" column="0">
-         <widget class="QLabel" name="hypoStepLabel">
-          <property name="text">
-           <string>Hypo grade step (% of max):</string>
-          </property>
-         </widget>
-        </item>
-        <item row="11" column="1">
-         <widget class="QDoubleSpinBox" name="hypoStepSpinBox">
+         <widget class="QDoubleSpinBox" name="gradeStepSpinBox">
           <property name="decimals">
            <number>0</number>
           </property>
@@ -1168,16 +1110,16 @@
            <double>2.0</double>
           </property>
           <property name="maximum">
-           <double>30.0</double>
+           <double>20.0</double>
           </property>
           <property name="singleStep">
            <double>1.0</double>
           </property>
           <property name="value">
-           <double>10.0</double>
+           <double>5.0</double>
           </property>
           <property name="toolTip">
-           <string>Hypoactive grade deepens by one level (-1 -> -2 -> -3 -> -4) for each step of this many % below the hypoactive threshold.</string>
+           <string>Amen 20-step scale: each grade is this many % of cerebellar max. Hyper +1..+4 step UP from the hyperactive threshold; hypo -1..-4 step DOWN from the hypoactive threshold. At the default 55/85 anchors and a 5% step, +4 reaches the 100% ceiling and -4 falls below 40%. (The active-render white point is set separately in the Active section.)</string>
           </property>
          </widget>
         </item>
@@ -1262,7 +1204,7 @@
            <string>Place patient landmarks</string>
           </property>
           <property name="toolTip">
-           <string>If the auto-registration is REVIEW/FAIL: drop 6 named landmark points (frontal/occipital poles, vertex, cerebellum, L/R temporal) at approximate spots, then drag each onto its true location in the slice views.</string>
+           <string>If the auto-registration is REVIEW/FAIL: drop 6 named landmark points, then drag each onto its TRUE location (check all 3 slice views). Five are silhouette EDGES - frontal &amp; occipital poles (front/back tips), vertex (crown), L/R temporal (outermost side of each temporal lobe). The cerebellum point is the CENTRE of the bright cerebellar blob (NOT its tip) and matters most. Confirm L/R orientation before the temporal points. Each point also carries a placement hint in its description.</string>
           </property>
          </widget>
         </item>
@@ -1325,6 +1267,65 @@
           </property>
           <property name="toolTip">
            <string>Position each TICKED region's Box ROI at its atlas centroid (better starting points than the fixed scaffold). Regions absent from the atlas fall back to the fractional placement. Drag each box to fine-tune.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="atlasOverlayLayout">
+        <item>
+         <widget class="QCheckBox" name="showSpectCheckBox">
+          <property name="text">
+           <string>Show SPECT</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>Show the SPECT image as the slice background. Untick to view the atlas alone.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="showAtlasCheckBox">
+          <property name="text">
+           <string>Show atlas overlay</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>Show the warped AAL3 atlas as a colored label overlay on the slices. Untick to view the SPECT alone.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="atlasOpacityLabel">
+          <property name="text">
+           <string>Atlas opacity:</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="ctkSliderWidget" name="atlasOpacitySlider">
+          <property name="decimals">
+           <number>2</number>
+          </property>
+          <property name="singleStep">
+           <double>0.05</double>
+          </property>
+          <property name="minimum">
+           <double>0.0</double>
+          </property>
+          <property name="maximum">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>0.5</double>
+          </property>
+          <property name="toolTip">
+           <string>Blend of the atlas overlay over the SPECT (0 = fully transparent, 1 = fully opaque).</string>
           </property>
          </widget>
         </item>
