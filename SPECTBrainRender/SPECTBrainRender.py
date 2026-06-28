@@ -135,7 +135,21 @@ DEFAULT_ASYMMETRY_PCT = 15.0     # |L-R| above this % of their mean is flagged
 # loose box is a small FRACTION but still a real cluster of voxels). Mirrors the
 # clinic's old "mask at 85%, average inside the mask" read.
 DEFAULT_MIN_HOT_VOXELS = 3
-DEFAULT_MIN_HOT_FRAC_PCT = 10.0
+DEFAULT_MIN_HOT_FRAC_PCT = 5.0
+# Focal HYPOactivity (the surface-scan "hole" read): a region is hypoactive if a
+# real fraction of its voxels fall BELOW the hypo % (the same cut the 3D surface
+# uses to carve a dent), even when the parcel MEAN clears the hypo line. Symmetric
+# to focal hyperactivity, so the table agrees with the surface holes. A region can
+# carry BOTH a focal dent and a focal hot focus -> classified "Mixed".
+DEFAULT_MIN_LOW_FRAC_PCT = 40.0  # >= this % of a region's voxels < hypo % = focal dent
+
+# Small-region guard: a parcel with fewer than this many tissue voxels is too small
+# to trust at SPECT resolution + atlas-registration slop (e.g. the ventral ACC ~4
+# voxels, nucleus accumbens ~7-9) - one misplaced voxel dominates it, and focal-hypo
+# would trivially flag "100% (4)". Such regions are shown with their numbers but
+# classed "Insufficient" (not auto-flagged, not counted, not colored).
+DEFAULT_MIN_REGION_VOXELS = 20
+CLS_INSUFFICIENT = "Insufficient"
 
 # Ordinal perfusion grade = the Amen step-20 color scale (each color = 5% of the
 # cerebellar-max reference, spanning 0-100%) re-expressed as SIGNED deviation
@@ -156,6 +170,7 @@ CLASS_COLORS = {
     "Hypoactive": (0.20, 0.45, 1.00),   # cold = blue
     "Normal": (0.55, 0.78, 0.45),       # green
     "Hyperactive": (1.00, 0.28, 0.22),  # hot = red
+    "Mixed": (0.72, 0.35, 0.85),        # both a dent and a hot focus = purple
 }
 # Ordinal grade colors: deep blue (-4) -> green (0) -> deep red (+4).
 GRADE_COLORS = {
@@ -172,7 +187,55 @@ def gradeLabel(grade):
 
 def rowDisplayColor(row):
     """Color for a region's ROI box and table cell, by ordinal grade."""
+    if row.get("cls") == CLS_INSUFFICIENT:
+        return (0.6, 0.6, 0.6)          # grey: too small to classify
     return GRADE_COLORS.get(row.get("grade", 0), (0.7, 0.7, 0.7))
+
+
+def classifyRegion(pct, hyperPct, hypoPct, hotFrac, lowFrac, hotMeanPct, lowMeanPct,
+                   focalHyperOn, focalHypoOn, minHotFrac, minLowFrac, gradeStepPct,
+                   countFocal=False, hotN=0, minHotVoxels=0,
+                   nvox=None, minRegionVoxels=0):
+    """Shared region classifier for both the ROI and atlas quantifiers, so the two
+    stay in lockstep. A region is HYPER if its mean exceeds hyperPct OR a focal hot
+    focus is present (hotFrac >= minHotFrac, or - ROI mode only - hotN >= minHotVoxels);
+    HYPO if its mean is below hypoPct OR a focal dent is present (lowFrac >= minLowFrac,
+    the same cut the surface render uses). Both can hold at once -> "Mixed". A region
+    below minRegionVoxels tissue voxels is too small to trust -> "Insufficient" (no
+    flags, no grade). Returns dict(cls, grade, focalHyper, focalHypo, hyperGrade,
+    hypoGrade); `grade` is the dominant signed deviation (drives the single Grade
+    column/ROI color)."""
+    if minRegionVoxels and nvox is not None and nvox < minRegionVoxels:
+        return dict(cls=CLS_INSUFFICIENT, grade=0, focalHyper=False, focalHypo=False,
+                    hyperGrade=0, hypoGrade=0)
+    focalHyper = bool(focalHyperOn and (hotFrac >= minHotFrac
+                                        or (countFocal and hotN >= minHotVoxels)))
+    focalHypo = bool(focalHypoOn and lowFrac >= minLowFrac)
+    hyperActive = (pct > hyperPct) or focalHyper
+    hypoActive = (pct < hypoPct) or focalHypo
+    # +1..+4 from hyperPct on the hot-voxel mean; -1..-4 from hypoPct - on the region
+    # mean when the mean itself is sub-threshold, else on the dent's (sub-cut) mean.
+    hyperGrade = 0
+    if hyperActive:
+        hv = hotMeanPct if hotMeanPct is not None else pct
+        steps = int((hv - hyperPct) / gradeStepPct) if gradeStepPct > 0 else 0
+        hyperGrade = min(4, 1 + max(0, steps))
+    hypoGrade = 0
+    if hypoActive:
+        base = pct if pct < hypoPct else (lowMeanPct if lowMeanPct is not None else pct)
+        steps = int((hypoPct - base) / gradeStepPct) if gradeStepPct > 0 else 0
+        hypoGrade = -min(4, 1 + max(0, steps))
+    if hyperActive and hypoActive:
+        cls = "Mixed"
+    elif hyperActive:
+        cls = "Hyperactive"
+    elif hypoActive:
+        cls = "Hypoactive"
+    else:
+        cls = "Normal"
+    grade = hyperGrade if abs(hyperGrade) >= abs(hypoGrade) else hypoGrade
+    return dict(cls=cls, grade=grade, focalHyper=focalHyper, focalHypo=focalHypo,
+                hyperGrade=hyperGrade, hypoGrade=hypoGrade)
 
 
 # Amen active-scan "hot" color LUT: the step-20 scale (each color = 5% of the
@@ -313,6 +376,13 @@ CEREB_ATLAS_LABELS = frozenset(range(95, 121))  # AAL3 cerebellum lobules + verm
 ATLAS_LUT_PATH = os.path.join(os.path.dirname(__file__), "Resources", "AAL3v1.nii.txt")
 ATLAS_IN_PATIENT_NAME = "AAL3 (in patient)"  # the warped atlas labelmap from registerAtlasToVolume
 ATLAS_COLOR_NODE_NAME = "AAL3 region names"  # color table that makes the labelmap hover-show region names
+
+# Primary atlas-fit path (Stage A): one Box ROI whose six faces the clinician
+# drags to the true brain edges (anterior/posterior/superior/inferior in the
+# sagittal view, left/right in coronal). The box defines an outer bounding box
+# that later scales the template+atlas into patient space (Stage B), refined by
+# BSpline. A robust, unfailable alternative to intensity-only auto-registration.
+BRAIN_BOX_NAME = "Brain box (atlas fit)"
 
 # #3 landmark re-align: (name, template RAS) pairs - derived from the bundled
 # template/atlas brain extremes (poles/vertex/temporal) + AAL3 cerebellum centroid.
@@ -570,6 +640,9 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.createRegionScaffoldButton.connect("clicked(bool)", self.onCreateRegionScaffold)
         self.ui.quantifyRegionsButton.connect("clicked(bool)", self.onQuantifyRegions)
         self.ui.exportRegionTsvButton.connect("clicked(bool)", self.onExportRegionTsv)
+        self.ui.createBrainBoxButton.connect("clicked(bool)", self.onCreateBrainBox)
+        self.ui.showBrainBoxCheckBox.connect("toggled(bool)", self.onToggleBrainBox)
+        self.ui.fitAtlasToBoxButton.connect("clicked(bool)", self.onFitAtlasToBrainBox)
         self.ui.registerAtlasButton.connect("clicked(bool)", self.onRegisterAtlas)
         self.ui.placeLandmarksButton.connect("clicked(bool)", self.onPlacePatientLandmarks)
         self.ui.landmarkRealignButton.connect("clicked(bool)", self.onLandmarkRealign)
@@ -608,6 +681,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.ui.exportSurfaceButton, self.ui.exportActiveButton,
             self.ui.createRegionScaffoldButton, self.ui.quantifyRegionsButton,
             self.ui.exportRegionTsvButton,
+            self.ui.createBrainBoxButton, self.ui.fitAtlasToBoxButton,
             self.ui.registerAtlasButton, self.ui.placeLandmarksButton,
             self.ui.landmarkRealignButton,
             self.ui.setReferenceFromAtlasButton, self.ui.seedRegionsFromAtlasButton,
@@ -718,6 +792,91 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                   self.ui.manualReferenceSpinBox):
             w.setEnabled(isCereb)
         self.refreshReferenceLabel()
+
+    def onCreateBrainBox(self):
+        node = self.currentVolumeNode()
+        if node is None:
+            return
+        slicer.util.setSliceViewerLayers(background=node, fit=True)
+        roi = self.logic.createBrainBoundingBox(node)
+        self.ui.showBrainBoxCheckBox.checked = True   # a fresh box is visible; keep the toggle in sync
+        b = [0.0] * 6
+        roi.GetRASBounds(b)
+        self.logic.jumpToRAS([(b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0,
+                              (b[4] + b[5]) / 2.0], showCrosshair=False)
+        slicer.app.applicationLogic().FitSliceToAll()
+        self.log(
+            "Created the BRAIN BOX, seeded at the auto-detected perfusion extent.\n"
+            "Drag its six faces to the true brain edges:\n"
+            "  - SAGITTAL (yellow): anterior / posterior / superior / inferior edges\n"
+            "  - CORONAL (green): left / right edges\n"
+            "Enclose the WHOLE perfused brain, including the cerebellum. CONFIRM L/R "
+            "orientation first - SPECT has no intrinsic left/right cue. The box's "
+            "outer faces (not a tight wrap) define the bounding box that scales the "
+            "AAL3 atlas in at the next step."
+        )
+
+    def onToggleBrainBox(self, checked):
+        roi = slicer.mrmlScene.GetFirstNodeByName(BRAIN_BOX_NAME)
+        if roi is None or not roi.IsA("vtkMRMLMarkupsROINode"):
+            self.log("No brain box yet - click 'Create brain box (atlas fit)' first.")
+            return
+        if roi.GetDisplayNode():
+            roi.GetDisplayNode().SetVisibility(checked)
+        self.log("Brain box " + ("shown." if checked else "hidden (still used for the fit)."))
+
+    def onFitAtlasToBrainBox(self):
+        # Stage B: scale the template + AAL3 into the clinician's brain box, BSpline-refine.
+        node = self.currentVolumeNode()
+        if node is None:
+            self.log("Select a SPECT volume first.")
+            return
+        roi = slicer.mrmlScene.GetFirstNodeByName(BRAIN_BOX_NAME)
+        if roi is None or not roi.IsA("vtkMRMLMarkupsROINode"):
+            self.log("No brain box yet - click 'Create brain box (atlas fit)' first, then "
+                     "drag its faces to the brain edges.")
+            return
+        if not self.ui.orientationConfirmedCheckBox.checked:
+            self.log("WARNING: orientation not confirmed - confirm L/R before reading laterality.")
+        self.log("Fitting the AAL3 atlas to the brain box (scale to box -> BSpline refine) - "
+                 "runs BRAINSFit, may take ~30-90 s ...")
+        slicer.app.processEvents()
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            warpedAtlas, qc, scale = self.logic.fitAtlasToBrainBox(node, roi)
+        except Exception as exc:
+            self.log("Atlas fit from brain box failed: %s" % exc)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self.ui.atlasLabelmapSelector.setCurrentNode(warpedAtlas)
+        self.applyAtlasOverlay(fit=True)  # SPECT + semi-transparent atlas, both visible
+        refNote = ""
+        try:
+            ref = self.logic.cerebellarMaxFromAtlas(node, warpedAtlas)
+            if ref > 0:
+                self.cerebellarMax = float(ref)
+                self._updatingFromCode = True
+                self.ui.manualReferenceSpinBox.value = self.cerebellarMax
+                self._updatingFromCode = False
+                self.refreshReferenceLabel()
+                refNote = " Cerebellar reference auto-set to %.0f (verify/override)." % self.cerebellarMax
+        except Exception:
+            pass
+        flags = ",".join(qc["flags"]) if qc["flags"] else "-"
+        msg = ("Atlas fit (brain box): QC %s [containment %.0f%%, cerebellum/brain %.2f, "
+               "NCC %.2f, cerebMax %.0f], box scale R-L/A-P/S-I = %.2f/%.2f/%.2f.%s" % (
+                   qc["verdict"], qc["containment"], qc["cerebRatio"], qc["ncc"],
+                   qc["cerebMax"], scale[0], scale[1], scale[2], refNote))
+        if qc["verdict"] == "PASS":
+            msg += " Looks good - now 'Quantify from atlas (exact masks)'."
+        elif qc["verdict"] == "REVIEW":
+            msg += (" REVIEW [%s]: eyeball the atlas overlay vs the SPECT. If a box face was "
+                    "loose, re-drag it tighter and re-fit." % flags)
+        else:
+            msg += (" FAIL [%s]: re-check the box encloses the WHOLE brain (cerebellum included) "
+                    "and L/R is correct, then re-fit; or use the landmark rescue below." % flags)
+        self.log(msg, replace=True)
 
     def onCreateCerebellumRoi(self):
         node = self.currentVolumeNode()
@@ -952,7 +1111,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ---- regional quantification -----------------------------------------
     def _configureRegionTable(self):
         t = self.ui.regionTableWidget
-        headers = ["Region", "Group", "% Ref", "Hot %", "Class", "Grade", "L-R %"]
+        headers = ["Region", "Group", "% Ref", "Hot %", "Low %", "Class", "Grade", "L-R %"]
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
         try:
@@ -1047,6 +1206,9 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             focalHyper=self.ui.focalHyperCheckBox.checked,
             minHotVoxels=int(self.ui.minHotVoxelsSpinBox.value),
             minHotFrac=self.ui.minHotFracSpinBox.value,
+            focalHypo=self.ui.focalHypoCheckBox.checked,
+            minLowFrac=self.ui.minLowFracSpinBox.value,
+            minRegionVoxels=int(self.ui.minRegionVoxelsSpinBox.value),
             gradeStepPct=self.ui.gradeStepSpinBox.value,
         )
 
@@ -1372,17 +1534,20 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for i, row in enumerate(rows):
             asym = "" if row["asym"] is None else ("%+.0f%%%s" % (
                 row["asym"], " *" if row["asymFlag"] else ""))
-            clsTxt = row["cls"] + (" (focal)" if row["focal"] else "")
+            clsTxt = row["cls"] + (" ↑" if row["focal"] else "") + (
+                " ↓" if row.get("focalHypo") else "")
             grd = gradeLabel(row["grade"]) if row["grade"] else ""
             cells = [row["name"], row["group"], "%.1f%%" % row["pct"],
-                     "%.0f%% (%d)" % (row["hotFrac"], row["hotN"]), clsTxt, grd, asym]
+                     "%.0f%% (%d)" % (row["hotFrac"], row["hotN"]),
+                     "%.0f%% (%d)" % (row.get("lowFrac", 0.0), row.get("lowN", 0)),
+                     clsTxt, grd, asym]
             cr, cg, cb = rowDisplayColor(row)
             bg = qt.QColor(int(cr * 255), int(cg * 255), int(cb * 255))
             bg.setAlpha(90)
             for c, text in enumerate(cells):
                 it = qt.QTableWidgetItem(text)
                 it.setData(qt.Qt.UserRole, row["name"])
-                if c in (2, 3, 5, 6):
+                if c in (2, 3, 4, 6, 7):
                     it.setTextAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
                 if c == 2:  # % Ref: Amen 20-step hot LUT (magnitude) - matches the render
                     lr, lg, lb = hotLutColor(row["pct"])
@@ -1391,11 +1556,13 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     it.setBackground(swatch)
                     lum = 0.299 * lr + 0.587 * lg + 0.114 * lb
                     it.setForeground(qt.QColor(0, 0, 0) if lum > 0.55 else qt.QColor(255, 255, 255))
-                if c in (4, 5):
+                if c in (5, 6):  # Class + Grade tinted by ordinal grade
                     it.setBackground(bg)
-                if c == 3 and row["focal"]:
+                if c == 3 and row["focal"]:        # focal hot focus
                     it.setBackground(qt.QColor(255, 120, 90, 130))
-                if c == 6 and row["asymFlag"]:
+                if c == 4 and row.get("focalHypo"):  # focal dent (surface hole)
+                    it.setBackground(qt.QColor(90, 140, 255, 130))
+                if c == 7 and row["asymFlag"]:
                     it.setBackground(qt.QColor(255, 210, 80, 110))
                 t.setItem(i, c, it)
 
@@ -2055,6 +2222,59 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         return int(poly.GetNumberOfPoints())
 
     # ---- cerebellar max --------------------------------------------------
+    def brainMaskBounds(self, volumeNode, thresholdFrac=0.30, erode=2):
+        """RAS bbox [xmin,xmax,ymin,ymax,zmin,zmax] of the largest perfused island
+        - a tight, noise-resistant brain extent for seeding the brain box. Unlike
+        brainBounds (raw nonzero, which scalp/scatter can inflate), this keeps only
+        the largest connected component above thresholdFrac of the robust (99.5th
+        pct) max, with a morphological opening to drop bridges. Falls back to
+        brainBounds if the mask is empty."""
+        import numpy as np
+        import itertools
+        arr = slicer.util.arrayFromVolume(volumeNode).astype(float)
+        pos = arr[arr > 0]
+        if pos.size == 0:
+            return self.brainBounds(volumeNode)
+        robustMax = float(np.percentile(pos, 99.5))
+        mask = self._largestIslandMask(volumeNode, thresholdFrac * robustMax, erode)
+        ks, js, iis = np.where(mask)
+        if iis.size == 0:
+            return self.brainBounds(volumeNode)
+        i2r = vtk.vtkMatrix4x4()
+        volumeNode.GetIJKToRASMatrix(i2r)
+        pts = np.array([i2r.MultiplyPoint([float(i), float(j), float(k), 1.0])[:3]
+                        for i, j, k in itertools.product(
+                            [int(iis.min()), int(iis.max())],
+                            [int(js.min()), int(js.max())],
+                            [int(ks.min()), int(ks.max())])])
+        mn, mx = pts.min(0), pts.max(0)
+        return [mn[0], mx[0], mn[1], mx[1], mn[2], mx[2]]
+
+    def createBrainBoundingBox(self, volumeNode):
+        """Stage A: seed the single 'brain box' Box ROI at the auto-detected brain
+        extent. Its six faces show as edge-lines in the slice views; the clinician
+        drags each to the true perfusion edge (A/P/S/I in sagittal, L/R in coronal).
+        Reuses/repositions the BRAIN_BOX_NAME node. The box later drives the atlas
+        fit (Stage B). Outline-only + interactive handles so the brain stays visible
+        and every face is grabbable. Returns the ROI node."""
+        b = self.brainMaskBounds(volumeNode)
+        cx, cy, cz = (b[0] + b[1]) / 2.0, (b[2] + b[3]) / 2.0, (b[4] + b[5]) / 2.0
+        roi = slicer.mrmlScene.GetFirstNodeByName(BRAIN_BOX_NAME)
+        if not (roi and roi.IsA("vtkMRMLMarkupsROINode")):
+            roi = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", BRAIN_BOX_NAME)
+        roi.SetCenter(cx, cy, cz)
+        roi.SetSize(b[1] - b[0], b[3] - b[2], b[5] - b[4])
+        roi.CreateDefaultDisplayNodes()
+        d = roi.GetDisplayNode()
+        if d:
+            d.SetVisibility(True)
+            d.SetFillVisibility(False)        # don't obscure the brain under the box
+            d.SetOutlineVisibility(True)
+            d.SetHandlesInteractive(True)     # draggable faces
+            d.SetColor(1.0, 0.85, 0.2)        # amber
+            d.SetSelectedColor(1.0, 0.85, 0.2)
+        return roi
+
     def createCerebellumRoi(self, volumeNode):
         """Place a Box ROI roughly over the posterior fossa (posterior-inferior)."""
         import numpy as np
@@ -2132,12 +2352,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             ch.SetCrosshairMode(mode)
 
     # ---- regional quantification (ports regional_table.py) ---------------
-    def regionRoiStats(self, roiNode, arr, rasToIjk, floor, hotThreshold=None):
+    def regionRoiStats(self, roiNode, arr, rasToIjk, floor, hotThreshold=None,
+                       lowThreshold=None):
         """Tissue (> floor) stats inside an ROI's axis-aligned bounding box, as
-        dict(mean, peak, nvox, hotN, hotFrac, hotMean) - or None if no tissue.
-        When hotThreshold (counts) is given, also counts/averages the "hot"
-        voxels >= it (the focal-hyperactivity test). Same AABB approach as the
-        clinic's regional_table._roi_stats / cerebellar_max."""
+        dict(mean, peak, nvox, hotN, hotFrac, hotMean, lowN, lowFrac, lowMean) - or
+        None if no tissue. When hotThreshold (counts) is given, also counts/averages
+        the "hot" voxels >= it (focal-hyperactivity test); when lowThreshold is given,
+        the "low" voxels < it (focal-hypoactivity / surface-hole test). Same AABB
+        approach as the clinic's regional_table._roi_stats / cerebellar_max."""
         import numpy as np
         import itertools
         bounds = [0.0] * 6
@@ -2157,12 +2379,18 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         if tissue.size == 0:
             return None
         res = dict(mean=float(tissue.mean()), peak=float(tissue.max()),
-                   nvox=int(tissue.size), hotN=0, hotFrac=0.0, hotMean=None)
+                   nvox=int(tissue.size), hotN=0, hotFrac=0.0, hotMean=None,
+                   lowN=0, lowFrac=0.0, lowMean=None)
         if hotThreshold is not None:
             hot = tissue[tissue >= hotThreshold]
             res["hotN"] = int(hot.size)
             res["hotFrac"] = float(hot.size) / float(tissue.size)
             res["hotMean"] = float(hot.mean()) if hot.size else None
+        if lowThreshold is not None:
+            low = tissue[tissue < lowThreshold]
+            res["lowN"] = int(low.size)
+            res["lowFrac"] = float(low.size) / float(tissue.size)
+            res["lowMean"] = float(low.mean()) if low.size else None
         return res
 
     def cerebellumMean(self, volumeNode, roiNode, floor):
@@ -2508,6 +2736,94 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         self.nameAtlasLabelmap(warpedAtlas)  # hover-show region names in the Data Probe
         return warpedAtlas, qc, rms
 
+    def fitAtlasToBrainBox(self, volumeNode, brainBoxRoiNode, transformType="Affine"):
+        """Stage B (PRIMARY atlas fit): scale the bundled template + AAL3 atlas into
+        patient space from the clinician's brain box, then BSpline-refine. The box's
+        eight RAS corners are matched to the eight corners of the template's own brain
+        box (computed by the SAME largest-island method), so a Fiducial-Registration
+        Affine yields an anisotropic scale+translate that drops the template brain
+        inside the drawn box. BRAINSFit (Rigid+Affine+BSpline, moments-init - now safe
+        because the two already overlap) then refines on intensity, correcting the
+        tilt/rotation the axis-aligned box cannot. The box is a robust, unfailable
+        initialiser - it can't land in the bad local minimum that intensity-only
+        moments-init falls into on atypical perfusion. Returns
+        (warpedAtlasLabelmap, qc, perAxisScaleRLAPSI)."""
+        import itertools
+        b = [0.0] * 6
+        brainBoxRoiNode.GetRASBounds(b)
+        if not (b[1] > b[0] and b[3] > b[2] and b[5] > b[4]):
+            raise RuntimeError("Brain box looks degenerate - re-create it and drag the "
+                               "faces to the brain edges.")
+        base = os.path.join(os.path.dirname(__file__), "Resources", "Atlas")
+        if not (os.path.exists(os.path.join(base, "AAL3v1.nii"))
+                and os.path.exists(os.path.join(base, "SPECT_HMPAO_template.nii.gz"))):
+            raise RuntimeError("Bundled atlas/template not found under Resources/Atlas.")
+        atlasMni = slicer.util.loadVolume(os.path.join(base, "AAL3v1.nii"))
+        tmpl = slicer.util.loadVolume(os.path.join(base, "SPECT_HMPAO_template.nii.gz"))
+        tb = self.brainMaskBounds(tmpl)            # template's own brain box, same method
+
+        def corners(bb):                            # 8 corners, identical ordering for both
+            return list(itertools.product(bb[0:2], bb[2:4], bb[4:6]))
+
+        patFids = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "BoxCornersPatient")
+        tmplFids = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "BoxCornersTemplate")
+        for (px, py, pz), (tx, ty, tz) in zip(corners(b), corners(tb)):
+            patFids.AddControlPoint(float(px), float(py), float(pz))
+            tmplFids.AddControlPoint(float(tx), float(ty), float(tz))
+        xf = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTransformNode", "BoxXf")
+        bsp = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLBSplineTransformNode", "BoxReg")
+        tmplCoarse = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "TmplCoarse")
+        atlasCoarse = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "AtlasCoarse")
+        old = slicer.mrmlScene.GetFirstNodeByName(ATLAS_IN_PATIENT_NAME)
+        if old:
+            slicer.mrmlScene.RemoveNode(old)
+        warpedAtlas = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", ATLAS_IN_PATIENT_NAME)
+        warpedTmpl = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "AtlasTemplateInPatient")
+        cleanup = [atlasMni, tmpl, patFids, tmplFids, warpedTmpl, xf, bsp, tmplCoarse, atlasCoarse]
+
+        def resample(inVol, outVol, warp, interp, ptype):
+            cli = slicer.cli.runSync(slicer.modules.brainsresample, None, {
+                "inputVolume": inVol.GetID(), "referenceVolume": volumeNode.GetID(),
+                "outputVolume": outVol.GetID(), "warpTransform": warp.GetID(),
+                "interpolationMode": interp, "pixelType": ptype})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSResample failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+        try:
+            # 1. fit the box->box affine (anisotropic scale + translate from 8 corners)
+            cli = slicer.cli.runSync(slicer.modules.fiducialregistration, None, {
+                "fixedLandmarks": patFids.GetID(), "movingLandmarks": tmplFids.GetID(),
+                "saveTransform": xf.GetID(), "transformType": transformType})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("Box fiducial registration failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+            # 2. scale the template + atlas into the drawn box
+            resample(tmpl, tmplCoarse, xf, "Linear", "float")
+            resample(atlasMni, atlasCoarse, xf, "NearestNeighbor", "short")
+            # 3. refine on intensity (now overlapping -> moments init is safe)
+            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, {
+                "fixedVolume": volumeNode.GetID(), "movingVolume": tmplCoarse.GetID(),
+                "bsplineTransform": bsp.GetID(), "outputVolume": warpedTmpl.GetID(),
+                "transformType": "Rigid,Affine,BSpline", "initializeTransformMode": "useMomentsAlign",
+                "costMetric": "MMI", "samplingPercentage": 0.05, "splineGridSize": "8,8,8"})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSFit (refine) failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+            # 4. apply the refinement to the coarse atlas (same space as tmplCoarse)
+            resample(atlasCoarse, warpedAtlas, bsp, "NearestNeighbor", "short")
+            qc = self.atlasRegistrationQC(volumeNode, warpedAtlas, warpedTmpl)
+            scale = ((b[1] - b[0]) / max(tb[1] - tb[0], 1e-6),
+                     (b[3] - b[2]) / max(tb[3] - tb[2], 1e-6),
+                     (b[5] - b[4]) / max(tb[5] - tb[4], 1e-6))
+        except Exception:
+            slicer.mrmlScene.RemoveNode(warpedAtlas)
+            raise
+        finally:
+            for nd in cleanup:
+                slicer.mrmlScene.RemoveNode(nd)
+        self.nameAtlasLabelmap(warpedAtlas)  # hover-show region names in the Data Probe
+        return warpedAtlas, qc, scale
+
     def seedRegionRoisFromAtlas(self, volumeNode, atlasLabelmapNode, names=None, sizeScale=1.0):
         """Atlas-seeded scaffold (#4): position each selected Amen region's Box
         ROI at the CENTROID of its mapped AAL3 voxels in the warped atlas - a
@@ -2577,6 +2893,8 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                                  asymmetryPct=DEFAULT_ASYMMETRY_PCT, robustReference=0.0,
                                  focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
                                  minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
+                                 focalHypo=True, minLowFrac=DEFAULT_MIN_LOW_FRAC_PCT,
+                                 minRegionVoxels=DEFAULT_MIN_REGION_VOXELS,
                                  maskToBrain=True, islandPct=30.0, islandErode=2,
                                  gradeStepPct=DEFAULT_GRADE_STEP_PCT):
         """Exact-mask regional quantification (#2): pool each Amen region's precise
@@ -2602,12 +2920,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                              "('Set reference from atlas cerebellum' or 'Manual reference').")
         floor = refval * floorPct / 100.0
         hotThreshold = refval * hyperPct / 100.0
+        lowThreshold = refval * hypoPct / 100.0     # = the surface-render hole cut
         masked = bool(maskToBrain and refval > 0)
         if masked:
             brain = self._largestIslandMask(volumeNode, refval * islandPct / 100.0, int(islandErode))
             arr = np.array(arrFull, dtype=float)
             arr[~brain] = 0.0
         else:
+            brain = arrFull > floor
             arr = np.asarray(arrFull, dtype=float)
         usePeak = (metric == REGION_METRIC_PEAK)
 
@@ -2627,22 +2947,16 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             hotN = int(hot.size)
             hotFrac = 100.0 * hotN / tissue.size
             hotMeanPct = (float(hot.mean()) / refval * 100.0) if hotN else None
+            low = tissue[tissue < lowThreshold]
+            lowN = int(low.size)
+            lowFrac = 100.0 * lowN / tissue.size
+            lowMeanPct = (float(low.mean()) / refval * 100.0) if lowN else None
             pct = val / refval * 100.0
-            focal = bool(focalHyper and hotFrac >= minHotFrac)   # atlas: fraction-only
-            if focal or pct > hyperPct:
-                cls = "Hyperactive"
-            elif pct < hypoPct:
-                cls = "Hypoactive"
-            else:
-                cls = "Normal"
-            grade = 0
-            if cls == "Hyperactive":
-                hv = hotMeanPct if hotMeanPct is not None else pct
-                steps = int((hv - hyperPct) / gradeStepPct) if gradeStepPct > 0 else 0
-                grade = min(4, 1 + max(0, steps))
-            elif cls == "Hypoactive":
-                steps = int((hypoPct - pct) / gradeStepPct) if gradeStepPct > 0 else 0
-                grade = -min(4, 1 + max(0, steps))
+            # atlas focal-hyper is fraction-only (a flat count over-fires on big parcels)
+            cz = classifyRegion(pct, hyperPct, hypoPct, hotFrac, lowFrac, hotMeanPct,
+                                lowMeanPct, focalHyper, focalHypo, minHotFrac, minLowFrac,
+                                gradeStepPct, countFocal=False,
+                                nvox=int(tissue.size), minRegionVoxels=minRegionVoxels)
             name = base if side == "M" else "%s %s" % (side, base)
             exact = AMEN_REGIONS_BY_NAME.get(name)
             grpSchema = (exact or AMEN_REGIONS_BY_NAME.get("L " + base)
@@ -2650,8 +2964,11 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             rows.append(dict(
                 name=name, group=grpSchema["group"] if grpSchema else "Subcortical",
                 side=side, base=base, note=exact["note"] if exact else "",
-                value=val, pct=pct, cls=cls, grade=grade, focal=focal,
+                value=val, pct=pct, cls=cz["cls"], grade=cz["grade"],
+                focal=cz["focalHyper"], focalHypo=cz["focalHypo"],
+                hyperGrade=cz["hyperGrade"], hypoGrade=cz["hypoGrade"],
                 nvox=int(tissue.size), hotN=hotN, hotFrac=hotFrac, hotMeanPct=hotMeanPct,
+                lowN=lowN, lowFrac=lowFrac, lowMeanPct=lowMeanPct,
                 asym=None, asymFlag=False))
 
         byBaseSide = {}
@@ -2670,17 +2987,29 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                         sides[s]["asymFlag"] = flag
 
         rows.sort(key=lambda r: r["pct"])
+        # QC: how much sub-hypo brain tissue lies OUTSIDE every AAL3 parcel (the
+        # rim/partial-volume dents the surface shows but no region can capture).
+        subLow = brain & (arrFull < lowThreshold) & (arrFull > floor)
+        nLowBrain = int(subLow.sum())
+        nLowOut = int((subLow & (lab == 0)).sum())
         meta = dict(refval=refval, reflabel="cerebellar max", floor=floor, metric=metric,
                     hypoPct=hypoPct, hyperPct=hyperPct, asymmetryPct=asymmetryPct,
                     focalHyper=focalHyper, minHotVoxels=minHotVoxels, minHotFrac=minHotFrac,
-                    hotThreshold=hotThreshold, masked=masked,
+                    focalHypo=focalHypo, minLowFrac=minLowFrac,
+                    minRegionVoxels=minRegionVoxels,
+                    hotThreshold=hotThreshold, lowThreshold=lowThreshold, masked=masked,
                     gradeStepPct=gradeStepPct,
-                    nHypo=sum(1 for r in rows if r["cls"] == "Hypoactive"),
-                    nHyper=sum(1 for r in rows if r["cls"] == "Hyperactive"),
+                    nHypo=sum(1 for r in rows if r["cls"] in ("Hypoactive", "Mixed")),
+                    nHyper=sum(1 for r in rows if r["cls"] in ("Hyperactive", "Mixed")),
+                    nMixed=sum(1 for r in rows if r["cls"] == "Mixed"),
+                    nSmall=sum(1 for r in rows if r["cls"] == CLS_INSUFFICIENT),
                     gradeCounts={g: sum(1 for r in rows if r["grade"] == g)
                                  for g in range(-4, 5) if g != 0},
                     nFocal=sum(1 for r in rows if r["focal"]),
+                    nFocalHypo=sum(1 for r in rows if r.get("focalHypo")),
                     nAsym=sum(1 for r in rows if r["asymFlag"] and r["side"] == "L"),
+                    nLowBrain=nLowBrain, nLowOut=nLowOut,
+                    holeOutsidePct=(100.0 * nLowOut / nLowBrain) if nLowBrain else 0.0,
                     nRegions=len(rows))
         return rows, meta
 
@@ -2691,6 +3020,8 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                         asymmetryPct=DEFAULT_ASYMMETRY_PCT, robustReference=0.0,
                         focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
                         minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
+                        focalHypo=True, minLowFrac=DEFAULT_MIN_LOW_FRAC_PCT,
+                        minRegionVoxels=DEFAULT_MIN_REGION_VOXELS,
                         maskToBrain=True, islandPct=30.0, islandErode=2,
                         gradeStepPct=DEFAULT_GRADE_STEP_PCT):
         """Quantify every Markups ROI (except the cerebellum reference) against
@@ -2747,6 +3078,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         # the active-scan red voxels), so the table agrees with the render.
         hotRef = cerebellarMax if cerebellarMax and cerebellarMax > 0 else refval
         hotThreshold = hotRef * hyperPct / 100.0
+        lowThreshold = hotRef * hypoPct / 100.0     # = the surface-render hole cut
 
         refName = referenceRoiNode.GetName() if referenceRoiNode is not None else None
         rows = []
@@ -2756,31 +3088,22 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             nm = roi.GetName()
             if refName is not None and nm == refName:
                 continue
-            st = self.regionRoiStats(roi, arr, r2i, floor, hotThreshold=hotThreshold)
+            st = self.regionRoiStats(roi, arr, r2i, floor, hotThreshold=hotThreshold,
+                                     lowThreshold=lowThreshold)
             if st is None:
                 continue
             val = st["peak"] if usePeak else st["mean"]
             pct = val / refval * 100.0
             hotFracPct = st["hotFrac"] * 100.0
             hotMeanPct = (st["hotMean"] / refval * 100.0) if st["hotMean"] is not None else None
-            focal = bool(focalHyper and (st["hotN"] >= minHotVoxels or hotFracPct >= minHotFrac))
-            if focal or pct > hyperPct:
-                cls = "Hyperactive"
-            elif pct < hypoPct:
-                cls = "Hypoactive"
-            else:
-                cls = "Normal"
-            # Ordinal grade = Amen step-20 scale (gradeStepPct % per color): hyper
-            # +1..+4 stepping up from hyperPct on the hot-voxel mean, hypo -1..-4
-            # stepping down from hypoPct on the region mean, normal 0.
-            grade = 0
-            if cls == "Hyperactive":
-                hv = hotMeanPct if hotMeanPct is not None else pct
-                steps = int((hv - hyperPct) / gradeStepPct) if gradeStepPct > 0 else 0
-                grade = min(4, 1 + max(0, steps))
-            elif cls == "Hypoactive":
-                steps = int((hypoPct - pct) / gradeStepPct) if gradeStepPct > 0 else 0
-                grade = -min(4, 1 + max(0, steps))
+            lowFracPct = st["lowFrac"] * 100.0
+            lowMeanPct = (st["lowMean"] / refval * 100.0) if st["lowMean"] is not None else None
+            # ROI mode keeps the OR'd count-or-fraction hot trigger (countFocal=True).
+            cz = classifyRegion(pct, hyperPct, hypoPct, hotFracPct, lowFracPct, hotMeanPct,
+                                lowMeanPct, focalHyper, focalHypo, minHotFrac, minLowFrac,
+                                gradeStepPct, countFocal=True, hotN=st["hotN"],
+                                minHotVoxels=minHotVoxels,
+                                nvox=st["nvox"], minRegionVoxels=minRegionVoxels)
             schema = AMEN_REGIONS_BY_NAME.get(nm)
             rows.append(dict(
                 name=nm,
@@ -2788,8 +3111,11 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 side=schema["side"] if schema else "?",
                 base=schema["base"] if schema else nm,
                 note=schema["note"] if schema else "",
-                value=val, pct=pct, cls=cls, grade=grade, focal=focal,
+                value=val, pct=pct, cls=cz["cls"], grade=cz["grade"],
+                focal=cz["focalHyper"], focalHypo=cz["focalHypo"],
+                hyperGrade=cz["hyperGrade"], hypoGrade=cz["hypoGrade"],
                 nvox=st["nvox"], hotN=st["hotN"], hotFrac=hotFracPct, hotMeanPct=hotMeanPct,
+                lowN=st["lowN"], lowFrac=lowFracPct, lowMeanPct=lowMeanPct,
                 asym=None, asymFlag=False))
 
         # L/R asymmetry for paired regions present on both sides (mean-based).
@@ -2812,13 +3138,18 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         meta = dict(refval=refval, reflabel=reflabel, floor=floor, metric=metric,
                     hypoPct=hypoPct, hyperPct=hyperPct, asymmetryPct=asymmetryPct,
                     focalHyper=focalHyper, minHotVoxels=minHotVoxels, minHotFrac=minHotFrac,
-                    hotThreshold=hotThreshold, masked=masked,
+                    focalHypo=focalHypo, minLowFrac=minLowFrac,
+                    minRegionVoxels=minRegionVoxels,
+                    hotThreshold=hotThreshold, lowThreshold=lowThreshold, masked=masked,
                     gradeStepPct=gradeStepPct,
-                    nHypo=sum(1 for r in rows if r["cls"] == "Hypoactive"),
-                    nHyper=sum(1 for r in rows if r["cls"] == "Hyperactive"),
+                    nHypo=sum(1 for r in rows if r["cls"] in ("Hypoactive", "Mixed")),
+                    nHyper=sum(1 for r in rows if r["cls"] in ("Hyperactive", "Mixed")),
+                    nMixed=sum(1 for r in rows if r["cls"] == "Mixed"),
+                    nSmall=sum(1 for r in rows if r["cls"] == CLS_INSUFFICIENT),
                     gradeCounts={g: sum(1 for r in rows if r["grade"] == g)
                                  for g in range(-4, 5) if g != 0},
                     nFocal=sum(1 for r in rows if r["focal"]),
+                    nFocalHypo=sum(1 for r in rows if r.get("focalHypo")),
                     nAsym=sum(1 for r in rows if r["asymFlag"] and r["side"] == "L"),
                     nRegions=len(rows))
         return rows, meta
@@ -2840,16 +3171,21 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         os.makedirs(outputDir, exist_ok=True)
         metricCol = "Peak_counts" if meta["metric"] == REGION_METRIC_PEAK else "Mean_counts"
         header = ("Region\tGroup\tSide\t%s\tPct_of_%s\tHot_voxels\tHot_pct_of_ROI\tHot_mean_pct\t"
-                  "Classification\tGrade\tFocal\tLR_asymmetry_pct\tVoxels\n" % (
+                  "Low_voxels\tLow_pct_of_ROI\tLow_mean_pct\t"
+                  "Classification\tGrade\tFocal_hot\tFocal_low\tLR_asymmetry_pct\tVoxels\n" % (
                       metricCol, meta["reflabel"].replace(" ", "_")))
 
         def fmt(row):
             asym = "" if row["asym"] is None else "%.1f" % row["asym"]
             hotMean = "" if row["hotMeanPct"] is None else "%.1f" % row["hotMeanPct"]
-            return "%s\t%s\t%s\t%.1f\t%.1f\t%d\t%.1f\t%s\t%s\t%s\t%s\t%s\t%d\n" % (
+            lowMean = "" if row.get("lowMeanPct") is None else "%.1f" % row["lowMeanPct"]
+            return "%s\t%s\t%s\t%.1f\t%.1f\t%d\t%.1f\t%s\t%d\t%.1f\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n" % (
                 row["name"], row["group"], row["side"], row["value"], row["pct"],
-                row["hotN"], row["hotFrac"], hotMean, row["cls"], gradeLabel(row["grade"]),
-                "yes" if row["focal"] else "", asym, row["nvox"])
+                row["hotN"], row["hotFrac"], hotMean,
+                row.get("lowN", 0), row.get("lowFrac", 0.0), lowMean,
+                row["cls"], gradeLabel(row["grade"]),
+                "yes" if row["focal"] else "", "yes" if row.get("focalHypo") else "",
+                asym, row["nvox"])
 
         full = os.path.join(outputDir, "regional_all.tsv")
         with open(full, "w") as f:
@@ -2860,7 +3196,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         with open(abn, "w") as f:
             f.write(header)
             for row in rows:
-                if row["cls"] in ("Hypoactive", "Hyperactive"):
+                if row["cls"] in ("Hypoactive", "Hyperactive", "Mixed"):
                     f.write(fmt(row))
         return full, abn
 
@@ -2872,39 +3208,52 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 "peak" if meta["metric"] == REGION_METRIC_PEAK else "mean",
                 meta["refval"], meta["reflabel"],
                 "brain-masked (matches render)" if meta.get("masked") else "RAW (incl. extracranial)"),
-            "Hypoactive = MEAN < %.0f%%.   Hyperactive = MEAN > %.0f%% OR %sa focal hot "
-            "focus: >= %d hot voxels OR >= %.0f%% of ROI, hot = >= %.0f%% (%.1f counts)." % (
-                meta["hypoPct"], meta["hyperPct"],
-                "" if meta["focalHyper"] else "[focal OFF] ",
-                meta["minHotVoxels"], meta["minHotFrac"], meta["hyperPct"], meta["hotThreshold"]),
+            "Hyperactive = MEAN > %.0f%% OR %sa focal HOT focus (>= %d hot vox OR >= %.0f%% "
+            "of ROI; hot = >= %.0f%%).  Hypoactive = MEAN < %.0f%% OR %sa focal DENT (>= %.0f%% "
+            "of ROI < %.0f%% - the surface-hole cut).  Mixed = both." % (
+                meta["hyperPct"], "" if meta["focalHyper"] else "[off] ",
+                meta["minHotVoxels"], meta["minHotFrac"], meta["hyperPct"],
+                meta["hypoPct"], "" if meta.get("focalHypo") else "[off] ",
+                meta.get("minLowFrac", DEFAULT_MIN_LOW_FRAC_PCT), meta["hypoPct"]),
             "Ordinal grade = Amen 20-step scale (%.0f%% per color): hyper +1..+4 step up "
             "from %.0f%%, hypo -1..-4 step down from %.0f%% (+4 reaches the 100%% ceiling, "
-            "-4 below %.0f%%)." % (
+            "-4 below %.0f%%). For a Mixed region the larger deviation is shown." % (
                 meta["gradeStepPct"], meta["hyperPct"], meta["hypoPct"],
                 meta["hypoPct"] - 3 * meta["gradeStepPct"]),
-            "%-44s %8s  %6s  %11s   %-14s %5s %6s" % (
-                "Region", valhdr, "%Ref", "Hot%(vox)", "Class", "Grade", "L-R%"),
-            "-" * 104,
+            "%-44s %8s  %6s  %11s  %11s   %-12s %5s %6s" % (
+                "Region", valhdr, "%Ref", "Hot%(vox)", "Low%(vox)", "Class", "Grade", "L-R%"),
+            "-" * 116,
         ]
         for row in rows:
             asym = "" if row["asym"] is None else "%+.0f" % row["asym"]
             mark = " *" if row["asymFlag"] else ""
-            clsTxt = row["cls"] + ("*" if row["focal"] else "")
+            fmarks = ("↑" if row["focal"] else "") + ("↓" if row.get("focalHypo") else "")
+            clsTxt = row["cls"] + fmarks
             grd = gradeLabel(row["grade"]) if row["grade"] else ""
             hot = "%.1f%%(%d)" % (row["hotFrac"], row["hotN"])
-            lines.append("%-44s %8.1f  %5.1f%%  %11s   %-14s %5s %6s%s" % (
-                row["name"], row["value"], row["pct"], hot, clsTxt, grd, asym, mark))
-        lines.append("-" * 104)
+            low = "%.1f%%(%d)" % (row.get("lowFrac", 0.0), row.get("lowN", 0))
+            lines.append("%-44s %8.1f  %5.1f%%  %11s  %11s   %-12s %5s %6s%s" % (
+                row["name"], row["value"], row["pct"], hot, low, clsTxt, grd, asym, mark))
+        lines.append("-" * 116)
         gc = meta["gradeCounts"]
         hyperBreak = " / ".join("+%d:%d" % (g, gc[g]) for g in (1, 2, 3, 4) if gc[g])
         hypoBreak = " / ".join("%d:%d" % (g, gc[g]) for g in (-1, -2, -3, -4) if gc[g])
-        lines.append("%d region(s): %d hypoactive [%s], %d hyperactive [%s] (%d focal*), "
-                     "%d L/R asymmetr%s >%.0f%% (marked *)." % (
+        smallNote = ""
+        if meta.get("nSmall"):
+            smallNote = " %d region(s) < %d voxels marked Insufficient (too small to classify)." % (
+                meta["nSmall"], meta.get("minRegionVoxels", DEFAULT_MIN_REGION_VOXELS))
+        lines.append("%d region(s): %d hypoactive [%s], %d hyperactive [%s], %d mixed; "
+                     "focal hot %d / focal dent %d; %d L/R asymmetr%s >%.0f%% (marked *).%s" % (
                          meta["nRegions"], meta["nHypo"], hypoBreak or "-",
-                         meta["nHyper"], hyperBreak or "-", meta["nFocal"], meta["nAsym"],
-                         "y" if meta["nAsym"] == 1 else "ies", meta["asymmetryPct"]))
-        # Surface the clinically-loaded regions when abnormal.
-        callouts = [r for r in rows if r["note"] and r["cls"] != "Normal"]
+                         meta["nHyper"], hyperBreak or "-", meta.get("nMixed", 0),
+                         meta["nFocal"], meta.get("nFocalHypo", 0), meta["nAsym"],
+                         "y" if meta["nAsym"] == 1 else "ies", meta["asymmetryPct"], smallNote))
+        if meta.get("nLowBrain"):
+            lines.append("QC: %.0f%% of sub-%.0f%% brain tissue (%d of %d voxels) falls OUTSIDE "
+                         "every AAL3 parcel - surface dents at the rim that no region can capture."
+                         % (meta["holeOutsidePct"], meta["hypoPct"], meta["nLowOut"], meta["nLowBrain"]))
+        # Surface the clinically-loaded regions when abnormal (not the too-small ones).
+        callouts = [r for r in rows if r["note"] and r["cls"] not in ("Normal", CLS_INSUFFICIENT)]
         for r in callouts:
             label = "%s (%s)" % (r["cls"].lower(), gradeLabel(r["grade"]))
             lines.append("  NOTE  %s is %s - %s." % (r["name"], label, r["note"]))
@@ -3099,6 +3448,8 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.test_RegionQuantify()
         self.test_RegionSelection()
         self.test_FocalHyperactive()
+        self.test_FocalHypo()
+        self.test_SmallRegionGuard()
         self.test_QuantifyMasksExtracranial()
         self.test_OrdinalGrade()
         self.test_AtlasSeedAndReference()
@@ -3398,11 +3749,10 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         rows, meta = logic.quantifyRegions(vol, None, 870.0,
                                            metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX)
         self.assertGreater(len(rows), 0)
-        # every row classified, pct = value / reference * 100
-        valid = {"Hypoactive", "Normal", "Hyperactive"}
+        # every row carries one of the valid classes, pct = value / reference * 100
+        valid = {"Hypoactive", "Normal", "Hyperactive", "Mixed", CLS_INSUFFICIENT}
         self.assertTrue(all(r["cls"] in valid for r in rows))
-        self.assertEqual(meta["nHypo"] + meta["nHyper"]
-                         + sum(1 for r in rows if r["cls"] == "Normal"), len(rows))
+        self.assertEqual(sum(1 for r in rows if r["cls"] in valid), len(rows))
         r0 = rows[0]
         self.assertAlmostEqual(r0["pct"], r0["value"] / 870.0 * 100.0, delta=0.01)
         # rows sorted most-hypo first
@@ -3499,6 +3849,102 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         print(f"TEST focal mean%={r['pct']:.1f} hot%={r['hotFrac']:.1f} hotN={r['hotN']} "
               f"hotMean%={r['hotMeanPct']:.1f} focalON={r['cls']} countOnly={r3['cls']} focalOFF={r2['cls']}")
         self.delayDisplay("Focal hyperactivity passed")
+
+    def test_FocalHypo(self):
+        self.delayDisplay("Focal hypoactivity (surface holes) + Mixed")
+        slicer.mrmlScene.Clear()
+        logic = SPECTBrainRenderLogic()
+        vol = self._makePhantom()
+        arr = slicer.util.arrayFromVolume(vol)
+        arr[:] = 0.0  # blank canvas; each ROI sees only its constructed cube (bg<floor)
+        i2r = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(i2r)
+
+        def placeRoi(name, i_center):
+            ras = i2r.MultiplyPoint([float(i_center), 12.0, 12.0, 1.0])[:3]
+            roi = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", name)
+            roi.CreateDefaultDisplayNodes()
+            roi.SetCenter(ras[0], ras[1], ras[2])
+            roi.SetSize(30.0, 30.0, 30.0)
+
+        # DENT-only cube (i 8-16): 50% of voxels at 400 (=46% of 870, < 55% hole cut),
+        # 50% at 600 (=69%). Mean 57.5% -> Normal by mean, but lowFrac 50% -> Hypoactive.
+        arr[8:16, 8:16, 8:12] = 400.0
+        arr[8:16, 8:16, 12:16] = 600.0
+        placeRoi("L Superior Parietal", 12)
+        # MIXED cube (i 30-40): 50% at 400 (dent), 10% at 760 (hot >=85%), 40% at 600.
+        arr[8:16, 8:16, 30:35] = 400.0
+        arr[8:16, 8:16, 35:36] = 760.0
+        arr[8:16, 8:16, 36:40] = 600.0
+        placeRoi("R Posterior Frontal", 35)
+        slicer.util.arrayFromVolumeModified(vol)
+
+        rows, meta = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False)
+        by = {r["name"]: r for r in rows}
+        dent, mix = by["L Superior Parietal"], by["R Posterior Frontal"]
+        # dent: Normal by mean (>55%) but flagged Hypoactive from the low fraction
+        self.assertGreater(dent["pct"], 55.0)
+        self.assertGreaterEqual(dent["lowFrac"], 40.0)
+        self.assertEqual(dent["cls"], "Hypoactive")
+        self.assertTrue(dent["focalHypo"])
+        self.assertFalse(dent["focal"])
+        # mixed: both a dent and a hot focus -> "Mixed", both flags set
+        self.assertEqual(mix["cls"], "Mixed")
+        self.assertTrue(mix["focalHypo"] and mix["focal"])
+
+        # focal-hypo OFF: the dent reverts to Normal (mean-based), mixed -> Hyperactive
+        rows2, _ = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False, focalHypo=False)
+        by2 = {r["name"]: r for r in rows2}
+        self.assertEqual(by2["L Superior Parietal"]["cls"], "Normal")
+        self.assertEqual(by2["R Posterior Frontal"]["cls"], "Hyperactive")
+        # report + TSV render the new columns without error
+        self.assertIn("Low%", logic.formatRegionReport(rows, meta))
+        print("TEST focalHypo dent=%s(low%%=%.0f mean%%=%.1f) mixed=%s offDent=%s offMixed=%s" % (
+            dent["cls"], dent["lowFrac"], dent["pct"], mix["cls"],
+            by2["L Superior Parietal"]["cls"], by2["R Posterior Frontal"]["cls"]))
+        self.delayDisplay("Focal hypoactivity + Mixed passed")
+
+    def test_SmallRegionGuard(self):
+        self.delayDisplay("Small-region guard (Insufficient)")
+        slicer.mrmlScene.Clear()
+        logic = SPECTBrainRenderLogic()
+        vol = self._makePhantom()
+        arr = slicer.util.arrayFromVolume(vol)
+        arr[:] = 0.0
+        i2r = vtk.vtkMatrix4x4(); vol.GetIJKToRASMatrix(i2r)
+
+        def placeRoi(name, i_c, j_c, k_c):
+            ras = i2r.MultiplyPoint([float(i_c), float(j_c), float(k_c), 1.0])[:3]
+            roi = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsROINode", name)
+            roi.CreateDefaultDisplayNodes()
+            roi.SetCenter(ras[0], ras[1], ras[2])
+            roi.SetSize(24.0, 24.0, 24.0)
+
+        # tiny region: 9 voxels, all 400 (=46% < 55%) -> would be Hypoactive but is
+        # below the 20-voxel floor -> Insufficient (not flagged, not counted)
+        arr[10:13, 10:13, 10:11] = 400.0
+        placeRoi("L Nucleus Accumbens", 10, 11, 11)
+        # large region: 64 voxels all 400 -> a trustworthy Hypoactive
+        arr[10:14, 10:14, 30:34] = 400.0
+        placeRoi("L Thalamus", 31, 11, 11)
+        slicer.util.arrayFromVolumeModified(vol)
+
+        rows, meta = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False)
+        by = {r["name"]: r for r in rows}
+        tiny, big = by["L Nucleus Accumbens"], by["L Thalamus"]
+        self.assertLess(tiny["nvox"], 20)
+        self.assertEqual(tiny["cls"], CLS_INSUFFICIENT)
+        self.assertFalse(tiny["focal"] or tiny["focalHypo"])
+        self.assertEqual(tiny["grade"], 0)
+        self.assertGreaterEqual(big["nvox"], 20)
+        self.assertEqual(big["cls"], "Hypoactive")   # 64 voxels, all < 55%
+        self.assertEqual(meta["nSmall"], 1)
+        # guard OFF -> the tiny region is classified again (Hypoactive)
+        rows2, _ = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False, minRegionVoxels=0)
+        self.assertEqual({r["name"]: r for r in rows2}["L Nucleus Accumbens"]["cls"], "Hypoactive")
+        print("TEST smallGuard tiny=%s(nvox=%d) big=%s(nvox=%d) nSmall=%d guardOff=%s" % (
+            tiny["cls"], tiny["nvox"], big["cls"], big["nvox"], meta["nSmall"],
+            {r["name"]: r for r in rows2}["L Nucleus Accumbens"]["cls"]))
+        self.delayDisplay("Small-region guard passed")
 
     def test_QuantifyMasksExtracranial(self):
         self.delayDisplay("Brain mask excludes extracranial hot uptake")

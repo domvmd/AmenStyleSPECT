@@ -1087,21 +1087,70 @@
            <double>1.0</double>
           </property>
           <property name="value">
-           <double>10.0</double>
+           <double>5.0</double>
           </property>
           <property name="toolTip">
-           <string>Alternative trigger: hyperactive if at least this % of the ROI is hot. OR'd with the hot-voxel count, so either one flags the region.</string>
+           <string>Alternative trigger: hyperactive if at least this % of the ROI is hot. OR'd with the hot-voxel count, so either one flags the region. Default 5% so small-but-real foci visible on the active render also flag in the table.</string>
           </property>
          </widget>
         </item>
         <item row="9" column="0">
+         <widget class="QLabel" name="focalHypoLabel">
+          <property name="text">
+           <string>Focal hypoactivity:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="9" column="1">
+         <widget class="QCheckBox" name="focalHypoCheckBox">
+          <property name="text">
+           <string>flag dents from low voxels, not the mean</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>A region is hypoactive if a focal cluster of its voxels falls BELOW the hypo % (the same cut the 3D surface uses to carve a hole), even when the parcel mean clears the hypo line. Makes the table agree with the surface holes. A region with both a dent and a hot focus is "Mixed".</string>
+          </property>
+         </widget>
+        </item>
+        <item row="10" column="0">
+         <widget class="QLabel" name="minLowFracLabel">
+          <property name="text">
+           <string>Focal: min low fraction (%):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="10" column="1">
+         <widget class="QDoubleSpinBox" name="minLowFracSpinBox">
+          <property name="decimals">
+           <number>0</number>
+          </property>
+          <property name="minimum">
+           <double>1.0</double>
+          </property>
+          <property name="maximum">
+           <double>100.0</double>
+          </property>
+          <property name="singleStep">
+           <double>1.0</double>
+          </property>
+          <property name="value">
+           <double>40.0</double>
+          </property>
+          <property name="toolTip">
+           <string>Hypoactive if at least this % of the region's voxels fall below the hypo % (the surface-hole cut). The "Low %" column shows each region's count. On a globally dim scan raise it (the whole brain runs low); for isolated holes on an otherwise normal brain the default 40% is specific.</string>
+          </property>
+         </widget>
+        </item>
+        <item row="11" column="0">
          <widget class="QLabel" name="gradeStepLabel">
           <property name="text">
            <string>Grade step (% per color):</string>
           </property>
          </widget>
         </item>
-        <item row="9" column="1">
+        <item row="11" column="1">
          <widget class="QDoubleSpinBox" name="gradeStepSpinBox">
           <property name="decimals">
            <number>0</number>
@@ -1120,6 +1169,32 @@
           </property>
           <property name="toolTip">
            <string>Amen 20-step scale: each grade is this many % of cerebellar max. Hyper +1..+4 step UP from the hyperactive threshold; hypo -1..-4 step DOWN from the hypoactive threshold. At the default 55/85 anchors and a 5% step, +4 reaches the 100% ceiling and -4 falls below 40%. (The active-render white point is set separately in the Active section.)</string>
+          </property>
+         </widget>
+        </item>
+        <item row="12" column="0">
+         <widget class="QLabel" name="minRegionVoxelsLabel">
+          <property name="text">
+           <string>Min region voxels:</string>
+          </property>
+         </widget>
+        </item>
+        <item row="12" column="1">
+         <widget class="QSpinBox" name="minRegionVoxelsSpinBox">
+          <property name="minimum">
+           <number>0</number>
+          </property>
+          <property name="maximum">
+           <number>100000</number>
+          </property>
+          <property name="singleStep">
+           <number>5</number>
+          </property>
+          <property name="value">
+           <number>20</number>
+          </property>
+          <property name="toolTip">
+           <string>A parcel with fewer than this many tissue voxels is too small to trust at SPECT resolution (e.g. ventral ACC ~4 voxels, nucleus accumbens ~7-9) - it is shown with its Low%/Hot% numbers but classed "Insufficient" (greyed, not auto-flagged, not counted). 0 = disable the guard. Raise it to be stricter about small subdivisions.</string>
           </property>
          </widget>
         </item>
@@ -1185,6 +1260,43 @@
          </widget>
         </item>
        </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="brainBoxLayout">
+        <item>
+         <widget class="QPushButton" name="createBrainBoxButton">
+          <property name="text">
+           <string>1. Create brain box (atlas fit)</string>
+          </property>
+          <property name="toolTip">
+           <string>PRIMARY atlas-fit path, step 1. Drops a single Box ROI at the auto-detected brain extent. Drag its six faces to the true perfusion edges - anterior/posterior/superior/inferior in the SAGITTAL (yellow) view, left/right in the CORONAL (green) view. Enclose the whole perfused brain, cerebellum included. Confirm L/R orientation first (SPECT has no intrinsic left/right cue). The box then scales the AAL3 atlas into patient space (BSpline-refined) at the fit step.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QCheckBox" name="showBrainBoxCheckBox">
+          <property name="text">
+           <string>Show box</string>
+          </property>
+          <property name="checked">
+           <bool>true</bool>
+          </property>
+          <property name="toolTip">
+           <string>Show or hide the brain box in the slice and 3D views. Hiding it does not delete it - the atlas fit still uses it.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <widget class="QPushButton" name="fitAtlasToBoxButton">
+        <property name="text">
+         <string>2. Fit atlas to brain box</string>
+        </property>
+        <property name="toolTip">
+         <string>PRIMARY atlas-fit path, step 2. Scales the bundled template + AAL3 atlas into the brain box you drew (matching the box's 8 corners to the template brain's corners), then BSpline-refines on the SPECT to correct tilt and local shape (BRAINSFit, ~30-90 s). Fills 'Warped atlas', auto-sets the cerebellar reference, and reports a QC verdict (PASS/REVIEW/FAIL) plus the per-axis scale applied. Robust where the auto-registration fails - the box can't land in a wrong pose.</string>
+        </property>
+       </widget>
       </item>
       <item>
        <widget class="QPushButton" name="registerAtlasButton">
