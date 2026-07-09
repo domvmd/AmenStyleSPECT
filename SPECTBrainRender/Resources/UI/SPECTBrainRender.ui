@@ -1198,6 +1198,38 @@
           </property>
          </widget>
         </item>
+        <item row="13" column="0">
+         <widget class="QLabel" name="fwhmLabel">
+          <property name="text">
+           <string>SPECT resolution (FWHM, mm):</string>
+          </property>
+         </widget>
+        </item>
+        <item row="13" column="1">
+         <widget class="QDoubleSpinBox" name="fwhmSpinBox">
+          <property name="decimals">
+           <number>1</number>
+          </property>
+          <property name="minimum">
+           <double>0.0</double>
+          </property>
+          <property name="maximum">
+           <double>30.0</double>
+          </property>
+          <property name="singleStep">
+           <double>0.5</double>
+          </property>
+          <property name="value">
+           <double>8.0</double>
+          </property>
+          <property name="suffix">
+           <string> mm</string>
+          </property>
+          <property name="toolTip">
+           <string>Reconstructed SPECT spatial resolution (full width at half maximum). Used to estimate each region's partial-volume recovery coefficient (RC) from its effective diameter, and to flag regions under 2x FWHM as PVE-limited and under 1x FWHM as Insufficient. Brain SPECT is typically 8-11 mm. Set to 0 to disable partial-volume flagging.</string>
+          </property>
+         </widget>
+        </item>
        </layout>
       </item>
       <item>
@@ -1327,6 +1359,40 @@
           </property>
           <property name="toolTip">
            <string>Fit a transform from your placed landmarks to the template and re-warp the AAL3 atlas onto the patient. Re-runs the QC verdict. The coarse rescue for cases the automatic registration could not align.</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="atlasNudgeLayout">
+        <item>
+         <widget class="QPushButton" name="startNudgeButton">
+          <property name="text">
+           <string>Start manual nudge</string>
+          </property>
+          <property name="toolTip">
+           <string>Attach interaction handles to the warped atlas so you can drag, rotate and scale it onto the brain in the slice and 3D views - the human-in-the-loop fine-tune for a REVIEW/FAIL fit. Fade the atlas opacity to see the SPECT underneath. Nothing changes until you click 'Apply nudge'.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="applyNudgeButton">
+          <property name="text">
+           <string>Apply nudge</string>
+          </property>
+          <property name="toolTip">
+           <string>Bake the manual nudge into the warped atlas (resamples the labels back onto the SPECT voxel grid), re-derive the cerebellar reference, and report the post-nudge QC. Then re-run 'Quantify from atlas' to read the corrected masks.</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="cancelNudgeButton">
+          <property name="text">
+           <string>Cancel nudge</string>
+          </property>
+          <property name="toolTip">
+           <string>Discard the manual nudge - the atlas reverts to its pre-nudge pose. Nothing is baked.</string>
           </property>
          </widget>
         </item>

@@ -4,7 +4,7 @@
 # Output: <project root>/AmenStyleSPECT-<version>.zip
 set -euo pipefail
 
-VERSION="0.8.0"
+VERSION="0.9.0"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # .../AmenStyleSPECT
 ROOT="$(dirname "$HERE")"                               # project root (parent)
 NAME="AmenStyleSPECT"

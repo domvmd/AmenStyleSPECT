@@ -18,8 +18,19 @@ except ImportError:
     pass
 
 
-# Reference (the count value that "100%" maps to). Cerebellar max is the Amen
-# default; the other two are conveniences / fallbacks.
+# Reference = the count value that "100%" maps to. ONE anchor for the whole
+# module: the surface render, the active render, and the regional-quantification
+# table all divide by the same value (resolved once by Logic.resolveReference and
+# fed through Widget._requireReference), so the picture and the numbers can never
+# disagree.
+#
+# The Amen reading convention is the MAXIMUM (peak) cerebellar count, NOT the mean
+# (cort3x 'spect-cerebellar-normalization': the display / threshold / grade anchor
+# is the cerebellar max; the cerebellum MEAN is only the denominator of a separate
+# cortex:cerebellum regional index, exposed as the '% of cerebellar mean' quant
+# mode). Robust / raw whole-brain max are fallbacks for an abnormal or absent
+# cerebellum (crossed diaschisis, tumor, atrophy) and re-anchor render + table
+# together.
 REF_CEREBELLUM = "Cerebellar max (Amen default)"
 REF_ROBUST_MAX = "Robust whole-brain max"
 REF_RAW_MAX = "Raw max"
@@ -117,7 +128,7 @@ SURFACE_MODEL_NAME = "AmenSurface"  # marching-cubes fallback surface
 # ------------------------------------------------------------------
 # Each region's MEAN or PEAK counts are expressed as a % of the cerebellar
 # reference (the Maximum Cerebellar Count, or the cerebellum-region mean) and
-# classified hypoactive (<60%) / normal / hyperactive (>80%).
+# classified hypoactive (<55%) / normal / hyperactive (>85%).
 REGION_METRIC_MEAN = "Region mean"
 REGION_METRIC_PEAK = "Region peak (hottest voxel)"
 REGION_REF_MAX = "% of cerebellar MAX"
@@ -150,6 +161,17 @@ DEFAULT_MIN_LOW_FRAC_PCT = 40.0  # >= this % of a region's voxels < hypo % = foc
 # classed "Insufficient" (not auto-flagged, not counted, not colored).
 DEFAULT_MIN_REGION_VOXELS = 20
 CLS_INSUFFICIENT = "Insufficient"
+
+# Partial-volume / resolution-mismatch tooling. SPECT resolves ~8-11 mm FWHM while
+# the warped AAL3 atlas draws 1 mm boundaries, so a small parcel's counts are a
+# blurred mixture of its neighbours (cort3x 'aal-atlas': the atlas-on-SPECT partial-
+# volume caveat). We estimate a per-region recovery coefficient (RC) from its
+# effective diameter vs the scanner FWHM and flag two danger tiers:
+#   effective diameter < INSUFFICIENT_FWHM_MULT x FWHM -> "Insufficient" (unmeasurable)
+#   effective diameter < PVE_FWHM_MULT x FWHM           -> "PVE-limited" (measured but degraded)
+DEFAULT_FWHM_MM = 8.0         # reconstructed SPECT resolution (FWHM); 0 disables the PVE flags
+INSUFFICIENT_FWHM_MULT = 1.0  # < 1x FWHM (RC ~0.3): too small to classify at all
+PVE_FWHM_MULT = 2.0           # < 2x FWHM (RC ~0.85): classify but flag as partial-volume-limited
 
 # Ordinal perfusion grade = the Amen step-20 color scale (each color = 5% of the
 # cerebellar-max reference, spanning 0-100%) re-expressed as SIGNED deviation
@@ -192,22 +214,55 @@ def rowDisplayColor(row):
     return GRADE_COLORS.get(row.get("grade", 0), (0.7, 0.7, 0.7))
 
 
+def sphereEquivDiameterMm(nvox, voxelVolumeMm3):
+    """Diameter (mm) of the sphere whose volume equals nvox voxels - a size proxy
+    for comparing a region against the scanner resolution."""
+    if nvox <= 0 or voxelVolumeMm3 <= 0:
+        return 0.0
+    import math
+    return 2.0 * (3.0 * nvox * voxelVolumeMm3 / (4.0 * math.pi)) ** (1.0 / 3.0)
+
+
+def sphereRecoveryCoefficient(diameterMm, fwhmMm):
+    """ESTIMATED partial-volume recovery coefficient for a uniform sphere of the
+    given diameter imaged with an isotropic Gaussian PSF of the given FWHM: the
+    fraction of true activity recovered at the sphere CENTER. Closed form is the
+    chi-3 CDF, P(|N(0, sigma^2 I_3)| < R) = erf(x/sqrt2) - sqrt(2/pi) x exp(-x^2/2),
+    with x = R/sigma, sigma = FWHM/2.3548, R = diameter/2. Monotonic; ~0.29 at
+    d=FWHM, ~0.86 at 2x FWHM, ~0.99 at 3x FWHM. This is an order-of-magnitude
+    ESTIMATE (center/peak recovery of a hot sphere on cold background), NOT a
+    calibrated partial-volume correction - use it to gauge trust, not to fix counts."""
+    import math
+    if fwhmMm <= 0 or diameterMm <= 0:
+        return 1.0
+    sigma = fwhmMm / 2.35482
+    x = (diameterMm / 2.0) / sigma
+    rc = math.erf(x / math.sqrt(2.0)) - math.sqrt(2.0 / math.pi) * x * math.exp(-x * x / 2.0)
+    return max(0.0, min(1.0, rc))
+
+
 def classifyRegion(pct, hyperPct, hypoPct, hotFrac, lowFrac, hotMeanPct, lowMeanPct,
                    focalHyperOn, focalHypoOn, minHotFrac, minLowFrac, gradeStepPct,
                    countFocal=False, hotN=0, minHotVoxels=0,
-                   nvox=None, minRegionVoxels=0):
+                   nvox=None, minRegionVoxels=0, dEffMm=None, fwhmMm=0.0):
     """Shared region classifier for both the ROI and atlas quantifiers, so the two
     stay in lockstep. A region is HYPER if its mean exceeds hyperPct OR a focal hot
     focus is present (hotFrac >= minHotFrac, or - ROI mode only - hotN >= minHotVoxels);
     HYPO if its mean is below hypoPct OR a focal dent is present (lowFrac >= minLowFrac,
     the same cut the surface render uses). Both can hold at once -> "Mixed". A region
-    below minRegionVoxels tissue voxels is too small to trust -> "Insufficient" (no
-    flags, no grade). Returns dict(cls, grade, focalHyper, focalHypo, hyperGrade,
-    hypoGrade); `grade` is the dominant signed deviation (drives the single Grade
-    column/ROI color)."""
-    if minRegionVoxels and nvox is not None and nvox < minRegionVoxels:
+    below minRegionVoxels tissue voxels - OR whose effective diameter is under
+    INSUFFICIENT_FWHM_MULT x the SPECT FWHM - is too small to trust -> "Insufficient"
+    (no flags, no grade). A region that clears that bar but is still under
+    PVE_FWHM_MULT x FWHM is classified but flagged pveLimited. Returns dict(cls, grade,
+    focalHyper, focalHypo, hyperGrade, hypoGrade, pveLimited); `grade` is the dominant
+    signed deviation (drives the single Grade column/ROI color)."""
+    tooFewVox = bool(minRegionVoxels and nvox is not None and nvox < minRegionVoxels)
+    tooSmallPhys = bool(fwhmMm and dEffMm is not None
+                        and dEffMm < INSUFFICIENT_FWHM_MULT * fwhmMm)
+    if tooFewVox or tooSmallPhys:
         return dict(cls=CLS_INSUFFICIENT, grade=0, focalHyper=False, focalHypo=False,
-                    hyperGrade=0, hypoGrade=0)
+                    hyperGrade=0, hypoGrade=0, pveLimited=False)
+    pveLimited = bool(fwhmMm and dEffMm is not None and dEffMm < PVE_FWHM_MULT * fwhmMm)
     focalHyper = bool(focalHyperOn and (hotFrac >= minHotFrac
                                         or (countFocal and hotN >= minHotVoxels)))
     focalHypo = bool(focalHypoOn and lowFrac >= minLowFrac)
@@ -235,7 +290,7 @@ def classifyRegion(pct, hyperPct, hypoPct, hotFrac, lowFrac, hotMeanPct, lowMean
         cls = "Normal"
     grade = hyperGrade if abs(hyperGrade) >= abs(hypoGrade) else hypoGrade
     return dict(cls=cls, grade=grade, focalHyper=focalHyper, focalHypo=focalHypo,
-                hyperGrade=hyperGrade, hypoGrade=hypoGrade)
+                hyperGrade=hyperGrade, hypoGrade=hypoGrade, pveLimited=pveLimited)
 
 
 # Amen active-scan "hot" color LUT: the step-20 scale (each color = 5% of the
@@ -298,6 +353,10 @@ def hotLutColor(pct):
 # Revised taxonomy (user, 2026-06-11): 27 base regions, EVERY one paired L/R = 54 ROIs.
 # 2026-06 (user): + Precuneus (posterior DMN hub, split out of Superior Parietal) = 28 base / 56 ROIs.
 # 2026-06 (user): + Nucleus Accumbens (ventral striatum, split out of Deep Limbic) = 29 base / 58 ROIs.
+# 2026-07 (user): cingulate divisions (5) pooled L+R -> MIDLINE. The cingulate is a thin
+#                 midline ribbon; splitting it at the interhemispheric fissure gives each half
+#                 worse SNR/partial-volume and a spurious L/R asymmetry (registration jitter
+#                 across the fissure CSF). Precuneus kept paired. = 29 base / 53 ROIs.
 REGION_SPECS = [
     # 1. Frontal lobe (7) - paired L/R
     ("Frontal Lobe", "Prefrontal Pole", True, "", 0.95, 0.45, 0.18),
@@ -307,12 +366,13 @@ REGION_SPECS = [
     ("Frontal Lobe", "Inferior Orbital PFC", True, "", 0.88, 0.20, 0.18),
     ("Frontal Lobe", "Medial PFC", True, "", 0.86, 0.55, 0.07),
     ("Frontal Lobe", "Inferior Frontal Gyrus (Broca's)", True, "Broca's area (dominant hemisphere)", 0.72, 0.42, 0.34),
-    # 2. Cingulate (5) - paired L/R, near midline
-    ("Cingulate Gyrus", "Anterior Cingulate - Dorsal", True, "", 0.72, 0.62, 0.07),
-    ("Cingulate Gyrus", "Anterior Cingulate - Genu", True, "", 0.80, 0.48, 0.07),
-    ("Cingulate Gyrus", "Anterior Cingulate - Ventral", True, "vACC - predicts SSRI response", 0.78, 0.36, 0.07),
-    ("Cingulate Gyrus", "Middle Cingulate", True, "", 0.52, 0.68, 0.07),
-    ("Cingulate Gyrus", "Posterior Cingulate", True, "first to drop in Alzheimer's", 0.32, 0.58, 0.07),
+    # 2. Cingulate (5) - MIDLINE (paired=False): pooled L+R. Thin midline ribbon where the
+    #    L/R split is partial-volume noise, not biology - so read it bilaterally.
+    ("Cingulate Gyrus", "Anterior Cingulate - Dorsal", False, "", 0.72, 0.62, 0.07),
+    ("Cingulate Gyrus", "Anterior Cingulate - Genu", False, "", 0.80, 0.48, 0.07),
+    ("Cingulate Gyrus", "Anterior Cingulate - Ventral", False, "vACC - predicts SSRI response", 0.78, 0.36, 0.07),
+    ("Cingulate Gyrus", "Middle Cingulate", False, "", 0.52, 0.68, 0.07),
+    ("Cingulate Gyrus", "Posterior Cingulate", False, "first to drop in Alzheimer's", 0.32, 0.58, 0.07),
     # 3. Temporal (6) - paired L/R
     ("Temporal Lobe", "Lateral Temporal - Anterior", True, "", 0.70, 0.30, 0.38),
     ("Temporal Lobe", "Lateral Temporal - Middle", True, "", 0.52, 0.30, 0.40),
@@ -363,6 +423,9 @@ def expandRegionSpecs(specs):
 
 AMEN_REGIONS = expandRegionSpecs(REGION_SPECS)
 AMEN_REGIONS_BY_NAME = {r["name"]: r for r in AMEN_REGIONS}
+# Bases declared MIDLINE in the taxonomy (side "M"): the atlas's L and R labels for
+# these are pooled into one bilateral region (see _atlasAmenOf).
+MIDLINE_BASES = frozenset(r["base"] for r in AMEN_REGIONS if r["side"] == "M")
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +438,7 @@ AMEN_REGIONS_BY_NAME = {r["name"]: r for r in AMEN_REGIONS}
 CEREB_ATLAS_LABELS = frozenset(range(95, 121))  # AAL3 cerebellum lobules + vermis
 ATLAS_LUT_PATH = os.path.join(os.path.dirname(__file__), "Resources", "AAL3v1.nii.txt")
 ATLAS_IN_PATIENT_NAME = "AAL3 (in patient)"  # the warped atlas labelmap from registerAtlasToVolume
+NUDGE_TRANSFORM_NAME = "AtlasNudge"          # interactive linear transform for the manual fine-tune
 ATLAS_COLOR_NODE_NAME = "AAL3 region names"  # color table that makes the labelmap hover-show region names
 
 # Primary atlas-fit path (Stage A): one Box ROI whose six faces the clinician
@@ -451,7 +515,9 @@ ATLAS_PREFIX_TO_AMEN = [
 
 def _atlasAmenOf(name):
     """(amen_base, side) for an AAL3 region name; (None, side) if unmapped.
-    Side from the _L/_R suffix, else 'M' (midline: vermis, raphe)."""
+    Side from the _L/_R suffix, else 'M' (midline: vermis, raphe). A base declared
+    MIDLINE in the taxonomy (MIDLINE_BASES - e.g. the cingulate divisions) forces
+    side 'M' so its L and R atlas labels pool into one bilateral region."""
     if name.endswith("_L") or name.endswith("_R"):
         stem, side = name[:-2], name[-1]
     else:
@@ -462,6 +528,8 @@ def _atlasAmenOf(name):
             if stem.startswith(pre):
                 base = mapped
                 break
+    if base in MIDLINE_BASES:
+        side = "M"
     return base, side
 
 
@@ -517,8 +585,8 @@ ramping to white (&ge;92%).</li>
 <li><b>Regional quantification</b> &mdash; read each region's mean / peak uptake
 as a % of the cerebellar reference, classified hypoactive / normal / hyperactive
 with focal-hot detection, an ordinal &plusmn;4 grade, left/right asymmetry flags
-and a TSV export. Two ways to define the 58 regions (29 paired L/R, incl. the
-nucleus accumbens): place named Box ROIs by hand, OR auto-register the bundled
+and a TSV export. Two ways to define the 53 regions (24 paired L/R + 5 midline
+cingulate, incl. the nucleus accumbens): place named Box ROIs by hand, OR auto-register the bundled
 AAL3 atlas to the SPECT and read each region's exact voxel mask (hover the warped
 atlas in the slice views to see region names).</li>
 </ul>
@@ -526,6 +594,15 @@ atlas in the slice views to see region names).</li>
 &lt;55%, normal 55&ndash;85%, hot/hyperactive &ge;85%. The &plusmn;4 grade is the
 Amen 20-step colour scale (5% of reference per step) read as signed deviation
 from the normal window.</p>
+<p><b>Partial volume:</b> set your scanner resolution in <b>SPECT resolution
+(FWHM, mm)</b>. The <b>Recov</b> column estimates each region's recovery
+coefficient from its effective diameter vs that FWHM; a region under 2&times;FWHM
+is flagged PVE-limited (&#9888;, read with caution) and under 1&times;FWHM is
+Insufficient. RC gauges trust at SPECT resolution &mdash; it is an estimate, not a
+partial-volume correction.</p>
+<p><b>Atlas fit off?</b> After registering, if the QC reads REVIEW/FAIL or the overlay
+looks misplaced, click <b>Start manual nudge</b>, drag / rotate / scale the atlas onto
+the brain in the views, then <b>Apply nudge</b> to bake it - and re-run the quantification.</p>
 """
         self.parent.acknowledgementText = """
 Visualization convention inspired by the Amen Clinics display style and ported
@@ -646,6 +723,9 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.registerAtlasButton.connect("clicked(bool)", self.onRegisterAtlas)
         self.ui.placeLandmarksButton.connect("clicked(bool)", self.onPlacePatientLandmarks)
         self.ui.landmarkRealignButton.connect("clicked(bool)", self.onLandmarkRealign)
+        self.ui.startNudgeButton.connect("clicked(bool)", self.onStartAtlasNudge)
+        self.ui.applyNudgeButton.connect("clicked(bool)", self.onApplyAtlasNudge)
+        self.ui.cancelNudgeButton.connect("clicked(bool)", self.onCancelAtlasNudge)
         self.ui.setReferenceFromAtlasButton.connect("clicked(bool)", self.onSetReferenceFromAtlas)
         self.ui.seedRegionsFromAtlasButton.connect("clicked(bool)", self.onSeedRegionsFromAtlas)
         self.ui.quantifyFromAtlasButton.connect("clicked(bool)", self.onQuantifyFromAtlas)
@@ -654,6 +734,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.atlasOpacitySlider.connect("valueChanged(double)", self.onAtlasOverlayChanged)
         self.ui.regionTableWidget.connect("cellDoubleClicked(int,int)", self.onRegionRowDoubleClicked)
         self._regionRows = []
+        self._regionMeta = None   # meta from the last quantify (drives TSV export labels)
 
         self.layout.addStretch(1)
         self.updateInputDependentEnabling()
@@ -706,6 +787,13 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Resolve the 100% reference value for the chosen mode."""
         mode = self.ui.referenceModeComboBox.currentText
         return self.logic.getReferenceValue(volumeNode, mode, self.cerebellarMax, stats)
+
+    def currentReferenceLabeled(self, volumeNode, stats=None):
+        """The 100% reference as (value, label) for the chosen mode - the single
+        anchor shared by the surface render, the active render, and the regional
+        table, so the picture and the numbers always use the same denominator."""
+        mode = self.ui.referenceModeComboBox.currentText
+        return self.logic.resolveReference(volumeNode, mode, self.cerebellarMax, stats)
 
     def refreshReferenceLabel(self, volumeNode=None):
         node = volumeNode or self.currentVolumeNode()
@@ -960,6 +1048,8 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     # ---- surface ---------------------------------------------------------
     def _requireReference(self, node):
+        """Resolve the shared 100% anchor as (value, label). The renders AND the
+        regional table all go through here, so they always use the same reference."""
         mode = self.ui.referenceModeComboBox.currentText
         if mode == REF_CEREBELLUM and self.cerebellarMax <= 0:
             self.log(
@@ -967,7 +1057,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                 "use 'Find cerebellar max', or switch the reference mode. Falling "
                 "back to robust whole-brain max for now."
             )
-        return self.currentReference(node)
+        return self.currentReferenceLabeled(node)
 
     def _surfaceVisible(self):
         """True if either surface representation (VR display node or mesh model)
@@ -1002,7 +1092,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if not self.ui.orientationConfirmedCheckBox.checked:
             self.log("WARNING: orientation not confirmed - do not read laterality yet.")
-        ref = self._requireReference(node)
+        ref, _ = self._requireReference(node)
         opts = self.preprocessOptions()
         threshold = self.ui.surfaceThresholdSlider.value
         technique = self.ui.surfaceTechniqueComboBox.currentText
@@ -1044,7 +1134,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if not self.ui.orientationConfirmedCheckBox.checked:
             self.log("WARNING: orientation not confirmed - do not read laterality yet.")
-        ref = self._requireReference(node)
+        ref, _ = self._requireReference(node)
         opts = self.preprocessOptions()
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
@@ -1111,7 +1201,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # ---- regional quantification -----------------------------------------
     def _configureRegionTable(self):
         t = self.ui.regionTableWidget
-        headers = ["Region", "Group", "% Ref", "Hot %", "Low %", "Class", "Grade", "L-R %"]
+        headers = ["Region", "Group", "% Ref", "Hot %", "Low %", "Class", "Grade", "L-R %", "Recov"]
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
         try:
@@ -1210,6 +1300,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             minLowFrac=self.ui.minLowFracSpinBox.value,
             minRegionVoxels=int(self.ui.minRegionVoxelsSpinBox.value),
             gradeStepPct=self.ui.gradeStepSpinBox.value,
+            fwhmMm=self.ui.fwhmSpinBox.value,
         )
 
     def onCreateRegionScaffold(self):
@@ -1359,6 +1450,56 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     "back to the manual ROI workflow." % (qc["verdict"], flags))
         self.log(msg, replace=True)
 
+    def onStartAtlasNudge(self):
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        if atlas is None:
+            self.log("Register or fit the atlas first, then start a manual nudge.")
+            return
+        self.applyAtlasOverlay()  # ensure the SPECT + atlas overlay are both visible
+        self.logic.beginAtlasNudge(atlas)
+        self.log("Manual nudge ON: drag the handles in the slice / 3D views to translate, "
+                 "rotate or scale the atlas onto the brain (fade the atlas opacity to see the "
+                 "SPECT under it). Then 'Apply nudge' to bake it, or 'Cancel nudge' to discard.")
+
+    def onApplyAtlasNudge(self):
+        node = self.currentVolumeNode()
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        if node is None or atlas is None:
+            self.log("Need the SPECT volume and the warped atlas to apply a nudge.")
+            return
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            qc = self.logic.applyAtlasNudge(atlas, node)
+        except Exception as exc:
+            self.log("Apply nudge failed: %s" % exc)
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self.applyAtlasOverlay()
+        # re-derive the cerebellar reference from the nudged atlas (mirrors registration)
+        refNote = ""
+        try:
+            ref = self.logic.cerebellarMaxFromAtlas(node, atlas)
+            if ref > 0:
+                self.cerebellarMax = float(ref)
+                self._updatingFromCode = True
+                self.ui.manualReferenceSpinBox.value = self.cerebellarMax
+                self._updatingFromCode = False
+                self.refreshReferenceLabel()
+                refNote = " Cerebellar reference re-set to %.0f (verify)." % self.cerebellarMax
+        except Exception:
+            pass
+        flags = ",".join(qc["flags"]) if qc.get("flags") else "-"
+        self.log("Nudge baked. QC: %s  [containment %.0f%%, cerebellum/brain %.2f, cerebMax %.0f; "
+                 "flags %s].%s Re-run 'Quantify from atlas' to read the corrected masks."
+                 % (qc["verdict"], qc["containment"], qc["cerebRatio"], qc["cerebMax"], flags, refNote))
+
+    def onCancelAtlasNudge(self):
+        atlas = self.ui.atlasLabelmapSelector.currentNode()
+        self.logic.cancelAtlasNudge(atlas)
+        self.applyAtlasOverlay()
+        self.log("Manual nudge cancelled - atlas reverted to its pre-nudge pose.")
+
     def onSetReferenceFromAtlas(self):
         # #1: read a robust cerebellar reference from the warped atlas cerebellum
         # labels into the existing 'Manual reference' field (clinician can override).
@@ -1457,21 +1598,21 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.applyAtlasOverlay()  # ensure SPECT + atlas both visible per the toggles
         if not self.ui.orientationConfirmedCheckBox.checked:
             self.log("WARNING: orientation not confirmed - do not read laterality yet.")
-        if self.cerebellarMax <= 0:
-            self.log("Set the cerebellar reference first ('Set reference from atlas "
-                     "cerebellum', or enter it in 'Manual reference').")
+        # One 100% anchor shared with the renders (cerebellar max by default; a
+        # whole-brain fallback if the reference mode is switched off cerebellar),
+        # so the table and the picture always use the same denominator.
+        ref, reflabel = self._requireReference(node)
+        if ref <= 0:
+            self.log("No reference available - set the cerebellar max ('Set reference "
+                     "from atlas cerebellum' / 'Manual reference') or pick a whole-brain "
+                     "reference mode.")
             return
-        try:
-            stats, _ = self.logic.computeStatistics(node, self.ui.robustPercentileSpinBox.value)
-            robust = stats["robustMax"]
-        except Exception:
-            robust = 0.0
         p = self._regionParams()
         opts = self.preprocessOptions()
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             rows, meta = self.logic.quantifyRegionsFromAtlas(
-                node, atlas, self.cerebellarMax, robustReference=robust,
+                node, atlas, ref, reflabel=reflabel,
                 maskToBrain=opts["keepLargestIsland"], islandPct=opts["islandPct"],
                 islandErode=opts["islandErode"], **p)
         except Exception as exc:
@@ -1484,6 +1625,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                      "into THIS patient's space?")
             return
         self._regionRows = rows
+        self._regionMeta = meta
         self._populateRegionTable(rows)
         self.log(self.logic.formatRegionReport(rows, meta), replace=True)
 
@@ -1499,17 +1641,14 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.log("Select a cerebellum ROI (the reference) for '%s' mode, or "
                      "switch to '%s'." % (REGION_REF_MEAN, REGION_REF_MAX))
             return
-        # robust whole-brain max as a fallback denominator when no cerebellar max set.
-        try:
-            stats, _ = self.logic.computeStatistics(node, self.ui.robustPercentileSpinBox.value)
-            robust = stats["robustMax"]
-        except Exception:
-            robust = 0.0
+        # One 100% anchor shared with the renders (the '% of cerebellar mean' mode
+        # instead divides by the cerebellum-ROI mean - the regional-index option).
+        ref, reflabel = self._requireReference(node)
         opts = self.preprocessOptions()
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             rows, meta = self.logic.quantifyRegions(
-                node, refRoi, self.cerebellarMax, robustReference=robust,
+                node, refRoi, ref, reflabel=reflabel,
                 maskToBrain=opts["keepLargestIsland"], islandPct=opts["islandPct"],
                 islandErode=opts["islandErode"], **p)
         except Exception as exc:
@@ -1523,6 +1662,7 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                      "'Quantify regions'.")
             return
         self._regionRows = rows
+        self._regionMeta = meta
         if self.ui.colorRoiByClassCheckBox.checked:
             self.logic.colorRegionRois(rows)
         self._populateRegionTable(rows)
@@ -1535,19 +1675,21 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             asym = "" if row["asym"] is None else ("%+.0f%%%s" % (
                 row["asym"], " *" if row["asymFlag"] else ""))
             clsTxt = row["cls"] + (" ↑" if row["focal"] else "") + (
-                " ↓" if row.get("focalHypo") else "")
+                " ↓" if row.get("focalHypo") else "") + (
+                " ⚠" if row.get("pveLimited") else "")
             grd = gradeLabel(row["grade"]) if row["grade"] else ""
+            rcTxt = "%.2f" % row["rc"] if row.get("rc") is not None else ""
             cells = [row["name"], row["group"], "%.1f%%" % row["pct"],
                      "%.0f%% (%d)" % (row["hotFrac"], row["hotN"]),
                      "%.0f%% (%d)" % (row.get("lowFrac", 0.0), row.get("lowN", 0)),
-                     clsTxt, grd, asym]
+                     clsTxt, grd, asym, rcTxt]
             cr, cg, cb = rowDisplayColor(row)
             bg = qt.QColor(int(cr * 255), int(cg * 255), int(cb * 255))
             bg.setAlpha(90)
             for c, text in enumerate(cells):
                 it = qt.QTableWidgetItem(text)
                 it.setData(qt.Qt.UserRole, row["name"])
-                if c in (2, 3, 4, 6, 7):
+                if c in (2, 3, 4, 6, 7, 8):
                     it.setTextAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
                 if c == 2:  # % Ref: Amen 20-step hot LUT (magnitude) - matches the render
                     lr, lg, lb = hotLutColor(row["pct"])
@@ -1564,6 +1706,13 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                     it.setBackground(qt.QColor(90, 140, 255, 130))
                 if c == 7 and row["asymFlag"]:
                     it.setBackground(qt.QColor(255, 210, 80, 110))
+                if c == 8:  # Recov = estimated partial-volume recovery coefficient
+                    it.setToolTip("Effective Ø %.0f mm; estimated recovery %.2f%s" % (
+                        row.get("dEff", 0.0), row.get("rc", 1.0),
+                        " - PARTIAL-VOLUME LIMITED (read with caution)"
+                        if row.get("pveLimited") else ""))
+                    if row.get("pveLimited"):
+                        it.setBackground(qt.QColor(255, 170, 60, 120))  # amber = PVE-limited
                 t.setItem(i, c, it)
 
     def onRegionRowDoubleClicked(self, rowIndex, _col):
@@ -1585,9 +1734,14 @@ class SPECTBrainRenderWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not outdir:
             self.log("Set an output folder first (Views / export section).")
             return
-        p = self._regionParams()
-        meta = dict(metric=p["metric"],
-                    reflabel="cerebellar mean" if p["refMode"] == REGION_REF_MEAN else "cerebellar max")
+        # Reuse the meta from the last quantify so the TSV's metric/reference label
+        # matches what the table was actually computed against (e.g. a whole-brain
+        # fallback reference), not a hard-coded "cerebellar max".
+        meta = self._regionMeta
+        if not meta:
+            p = self._regionParams()
+            meta = dict(metric=p["metric"],
+                        reflabel="cerebellar mean" if p["refMode"] == REGION_REF_MEAN else "cerebellar max")
         full, abn = self.logic.exportRegionTsv(self._regionRows, meta, outdir)
         nAbn = sum(1 for r in self._regionRows if r["cls"] in ("Hypoactive", "Hyperactive"))
         self.log("Saved regional tables:\n  %s (all %d)\n  %s (%d hypo/hyper)" % (
@@ -1646,15 +1800,29 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                     robustPercentile=robustPercentile,
                     maskVoxels=int(maskArr.sum()), totalVoxels=int(arr.size)), maskArr
 
-    def getReferenceValue(self, volumeNode, mode, cerebellarMax, stats=None):
+    def resolveReference(self, volumeNode, mode, cerebellarMax, stats=None):
+        """Single source of truth for the 100% anchor used by BOTH the 3D renders
+        and the regional table. Returns (value, label).
+
+        The default (cerebellar max) is the Amen reading convention: the PEAK
+        cerebellar count, per cort3x 'spect-cerebellar-normalization' - the
+        display/threshold/grade anchor is the MAXIMUM cerebellar count, not the
+        mean. REF_ROBUST_MAX / REF_RAW_MAX are the whole-brain fallbacks for an
+        abnormal or absent cerebellum (crossed diaschisis, tumor, atrophy); because
+        render and quantification both resolve through here, switching the mode
+        re-anchors the picture and the table together - they can never diverge."""
         if mode == REF_CEREBELLUM and cerebellarMax and cerebellarMax > 0:
-            return float(cerebellarMax)
+            return float(cerebellarMax), "cerebellar max"
         if stats is None:
             stats, _ = self.computeStatistics(volumeNode)
         if mode == REF_RAW_MAX:
-            return stats["rawMax"]
+            return float(stats["rawMax"]), "raw whole-brain max"
         # REF_ROBUST_MAX, or cerebellum-but-unset -> robust whole-brain max.
-        return stats["robustMax"]
+        return float(stats["robustMax"]), "robust whole-brain max"
+
+    def getReferenceValue(self, volumeNode, mode, cerebellarMax, stats=None):
+        """Numeric 100% anchor only; see resolveReference for the (value, label)."""
+        return self.resolveReference(volumeNode, mode, cerebellarMax, stats)[0]
 
     def _largestConnectedComponent(self, binary):
         import numpy as np
@@ -1742,6 +1910,56 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         m = numpy_support.vtk_to_numpy(out.GetPointData().GetScalars())
         shape = slicer.util.arrayFromVolume(volumeNode).shape
         return m.reshape(shape) > 0
+
+    def _brainMaskLabelmap(self, volumeNode, name, thresholdFrac=0.15, erode=1, dilate=2):
+        """A labelmap (1 = brain) of volumeNode's largest perfusion island, in the
+        node's own geometry, for use as a BRAINSFit registration ROI (fixed/moving
+        BinaryVolume) so extracranial uptake stops pulling the intensity warp.
+        Deliberately GENEROUS (low threshold + dilation) to keep all of the brain
+        inside while dropping disconnected scalp / salivary / sinus blobs. Returns
+        the labelmap node, or None if no brain is found."""
+        import numpy as np
+        arr = slicer.util.arrayFromVolume(volumeNode)
+        pos = arr[arr > 0]
+        if pos.size == 0:
+            return None
+        robustMax = float(np.percentile(pos, 99.5))
+        if robustMax <= 0:
+            return None
+        mask = self._largestIslandMask(volumeNode, thresholdFrac * robustMax, erode)
+        if not mask.any():
+            return None
+        if dilate > 0:
+            try:
+                from scipy import ndimage
+                mask = ndimage.binary_dilation(mask, iterations=int(dilate))
+            except Exception:
+                pass
+        lm = slicer.modules.volumes.logic().CreateAndAddLabelVolume(
+            slicer.mrmlScene, volumeNode, name)
+        a = slicer.util.arrayFromVolume(lm)
+        a[:] = mask.astype(a.dtype)
+        slicer.util.arrayFromVolumeModified(lm)
+        return lm
+
+    def _registrationMaskParams(self, fixedNode, movingNode, cleanup):
+        """BRAINSFit ROI-mask params - brain masks for the fixed (patient SPECT) and
+        moving (template) images - so the intensity metric is sampled only inside the
+        brain and scalp/salivary/sinus uptake no longer drags the warp. Appends the
+        two created labelmaps to `cleanup` for later removal. Returns {} (no masking,
+        BRAINSFit's default) if either brain mask cannot be built, so registration
+        still runs."""
+        fixedMask = self._brainMaskLabelmap(fixedNode, "RegFixedBrainMask")
+        movingMask = self._brainMaskLabelmap(movingNode, "RegMovingBrainMask")
+        if fixedMask is not None and movingMask is not None:
+            cleanup.extend([fixedMask, movingMask])
+            return {"maskProcessingMode": "ROI",
+                    "fixedBinaryVolume": fixedMask.GetID(),
+                    "movingBinaryVolume": movingMask.GetID()}
+        for m in (fixedMask, movingMask):
+            if m is not None:
+                slicer.mrmlScene.RemoveNode(m)
+        return {}
 
     def largestIslandVolume(self, volumeNode, thresholdValue, erode=0,
                             maskedName=MASKED_VOLUME_NAME):
@@ -2491,7 +2709,11 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         import numpy as np
         raw = slicer.util.arrayFromVolume(volumeNode).astype(float)
         A = slicer.util.arrayFromVolume(atlasLabelmapNode)
-        T = slicer.util.arrayFromVolume(warpedTemplateNode).astype(float)
+        # warpedTemplateNode may be None (post-nudge re-QC): a manual nudge moves the
+        # atlas, not the template, so NCC no longer applies - skip it and judge by
+        # containment + cerebellum ratio instead.
+        hasTemplate = warpedTemplateNode is not None
+        T = slicer.util.arrayFromVolume(warpedTemplateNode).astype(float) if hasTemplate else None
         robustMax = float(np.percentile(raw[raw > 0], robustPct)) if (raw > 0).any() else 0.0
         cerebMask = np.isin(A, list(CEREB_ATLAS_LABELS))
         cerebMax = float(raw[cerebMask].max()) if cerebMask.any() else 0.0
@@ -2501,18 +2723,18 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         cerebRatio = (float(raw[cerebMask].mean() / raw[brain].mean())
                       if (cerebMask.any() and nBrain) else 0.0)
         refRatio = (cerebMax / robustMax) if robustMax else 0.0
-        if nBrain:
+        if hasTemplate and nBrain:
             a = raw[brain] - raw[brain].mean()
             b = T[brain] - T[brain].mean()
             ncc = float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-9))
         else:
-            ncc = 0.0
+            ncc = 0.0 if hasTemplate else None
         flags = []
         if containment < 80:
             flags.append("containment")
         if not (0.85 <= cerebRatio <= 1.4):
             flags.append("cerebRatio")
-        if ncc < 0.70:
+        if ncc is not None and ncc < 0.70:
             flags.append("ncc")
         if refRatio and refRatio < 0.85:
             flags.append("reference")
@@ -2521,6 +2743,77 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         return dict(containment=containment, cerebRatio=cerebRatio, ncc=ncc, cerebMax=cerebMax,
                     robustMax=robustMax, refRatio=refRatio, nBrain=nBrain,
                     flags=flags, verdict=verdict)
+
+    # ---- manual nudge (human-in-the-loop fine-tune of the atlas fit) -----
+    def beginAtlasNudge(self, atlasLabelmapNode):
+        """Attach an interactive LINEAR transform to the warped atlas so the clinician
+        can translate / rotate / scale it onto the brain by dragging handles in the
+        slice + 3D views - the human-in-the-loop rescue for a REVIEW/FAIL fit. Nothing
+        is baked until applyAtlasNudge; cancelAtlasNudge reverts. Returns the transform
+        node."""
+        old = slicer.mrmlScene.GetFirstNodeByName(NUDGE_TRANSFORM_NAME)
+        if old:
+            slicer.mrmlScene.RemoveNode(old)
+        xf = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLinearTransformNode", NUDGE_TRANSFORM_NAME)
+        xf.CreateDefaultDisplayNodes()
+        dn = xf.GetDisplayNode()
+        if dn:
+            dn.SetEditorVisibility(True)  # show the interaction handles in the views
+            for setter in ("SetEditorTranslationEnabled", "SetEditorRotationEnabled",
+                           "SetEditorScalingEnabled"):
+                if hasattr(dn, setter):
+                    getattr(dn, setter)(True)
+        atlasLabelmapNode.SetAndObserveTransformNodeID(xf.GetID())
+        return xf
+
+    def cancelAtlasNudge(self, atlasLabelmapNode):
+        """Detach and discard the nudge transform - the atlas reverts to its pre-nudge
+        pose (nothing was baked). Safe to call when no nudge is active."""
+        parent = atlasLabelmapNode.GetParentTransformNode() if atlasLabelmapNode else None
+        if atlasLabelmapNode:
+            atlasLabelmapNode.SetAndObserveTransformNodeID(None)
+        stray = slicer.mrmlScene.GetFirstNodeByName(NUDGE_TRANSFORM_NAME)
+        for n in (parent, stray):
+            if n is not None and n.GetName() == NUDGE_TRANSFORM_NAME:
+                slicer.mrmlScene.RemoveNode(n)
+
+    def applyAtlasNudge(self, atlasLabelmapNode, volumeNode):
+        """Bake the manual nudge: harden the linear transform into the atlas geometry
+        (a matrix compose - lossless, the label voxels are untouched), then NN-regrid
+        the atlas back onto the SPECT voxel grid so quantifyRegionsFromAtlas reads
+        voxel-aligned labels. Refreshes the hover names and returns a template-free QC
+        dict (NCC is None - see atlasRegistrationQC). Raises if no nudge is active."""
+        xf = atlasLabelmapNode.GetParentTransformNode()
+        if xf is None or xf.GetName() != NUDGE_TRANSFORM_NAME:
+            raise RuntimeError("No manual nudge in progress - click 'Start manual nudge' first.")
+        dn = xf.GetDisplayNode()
+        if dn:
+            dn.SetEditorVisibility(False)
+        # linear transform -> composed into the atlas IJK-to-RAS (no resampling here)
+        slicer.vtkSlicerTransformLogic().hardenTransform(atlasLabelmapNode)
+        atlasLabelmapNode.SetAndObserveTransformNodeID(None)
+        slicer.mrmlScene.RemoveNode(xf)
+        # NN-regrid onto the SPECT grid so the nudged labels are voxel-aligned again
+        tmp = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "AtlasNudgeRegrid")
+        try:
+            cli = slicer.cli.runSync(slicer.modules.brainsresample, None, {
+                "inputVolume": atlasLabelmapNode.GetID(), "referenceVolume": volumeNode.GetID(),
+                "outputVolume": tmp.GetID(), "interpolationMode": "NearestNeighbor",
+                "pixelType": "short"})
+            if cli.GetStatusString() != "Completed":
+                raise RuntimeError("BRAINSResample (nudge regrid) failed: "
+                                   + (cli.GetParameterAsString("errorText") or "?"))
+            import vtk
+            img = vtk.vtkImageData()
+            img.DeepCopy(tmp.GetImageData())
+            atlasLabelmapNode.SetAndObserveImageData(img)
+            ijk = vtk.vtkMatrix4x4()
+            tmp.GetIJKToRASMatrix(ijk)
+            atlasLabelmapNode.SetIJKToRASMatrix(ijk)
+        finally:
+            slicer.mrmlScene.RemoveNode(tmp)
+        self.nameAtlasLabelmap(atlasLabelmapNode)  # reattach the region-name color table
+        return self.atlasRegistrationQC(volumeNode, atlasLabelmapNode, None)
 
     def atlasColorTableNode(self, lutPath=ATLAS_LUT_PATH):
         """Build (once, then reuse) a color table mapping each AAL3 label value to
@@ -2615,6 +2908,8 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             }
             if deformable:
                 fitParams["splineGridSize"] = "8,8,8"
+            # confine the metric to brain so scalp/salivary/sinus uptake can't pull the warp
+            fitParams.update(self._registrationMaskParams(volumeNode, tmpl, cleanup))
             cli = slicer.cli.runSync(slicer.modules.brainsfit, None, fitParams)
             if cli.GetStatusString() != "Completed":
                 raise RuntimeError("BRAINSFit failed: " + (cli.GetParameterAsString("errorText") or "?"))
@@ -2716,11 +3011,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             resample(atlasMni, atlasCoarse, xf, "NearestNeighbor", "short")
             # 3. refine: BRAINSFit the now-close coarse template to the patient (moments-
             #    init works since they already overlap), Rigid+Affine+BSpline
-            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, {
+            refineParams = {
                 "fixedVolume": volumeNode.GetID(), "movingVolume": tmplCoarse.GetID(),
                 "bsplineTransform": bsp.GetID(), "outputVolume": warpedTmpl.GetID(),
                 "transformType": "Rigid,Affine,BSpline", "initializeTransformMode": "useMomentsAlign",
-                "costMetric": "MMI", "samplingPercentage": 0.05, "splineGridSize": "8,8,8"})
+                "costMetric": "MMI", "samplingPercentage": 0.05, "splineGridSize": "8,8,8"}
+            # confine the metric to brain so extracranial uptake can't pull the warp
+            refineParams.update(self._registrationMaskParams(volumeNode, tmplCoarse, cleanup))
+            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, refineParams)
             if cli.GetStatusString() != "Completed":
                 raise RuntimeError("BRAINSFit (refine) failed: "
                                    + (cli.GetParameterAsString("errorText") or "?"))
@@ -2801,11 +3099,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             resample(tmpl, tmplCoarse, xf, "Linear", "float")
             resample(atlasMni, atlasCoarse, xf, "NearestNeighbor", "short")
             # 3. refine on intensity (now overlapping -> moments init is safe)
-            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, {
+            refineParams = {
                 "fixedVolume": volumeNode.GetID(), "movingVolume": tmplCoarse.GetID(),
                 "bsplineTransform": bsp.GetID(), "outputVolume": warpedTmpl.GetID(),
                 "transformType": "Rigid,Affine,BSpline", "initializeTransformMode": "useMomentsAlign",
-                "costMetric": "MMI", "samplingPercentage": 0.05, "splineGridSize": "8,8,8"})
+                "costMetric": "MMI", "samplingPercentage": 0.05, "splineGridSize": "8,8,8"}
+            # confine the metric to brain so extracranial uptake can't pull the warp
+            refineParams.update(self._registrationMaskParams(volumeNode, tmplCoarse, cleanup))
+            cli = slicer.cli.runSync(slicer.modules.brainsfit, None, refineParams)
             if cli.GetStatusString() != "Completed":
                 raise RuntimeError("BRAINSFit (refine) failed: "
                                    + (cli.GetParameterAsString("errorText") or "?"))
@@ -2886,24 +3187,26 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             self.createRegionRoiScaffold(volumeNode, names=fallback, sizeScale=sizeScale)
         return nSeeded, len(fallback)
 
-    def quantifyRegionsFromAtlas(self, volumeNode, atlasLabelmapNode, cerebellarMax,
+    def quantifyRegionsFromAtlas(self, volumeNode, atlasLabelmapNode, reference,
+                                 reflabel="cerebellar max",
                                  metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX,
                                  hypoPct=DEFAULT_HYPO_PCT, hyperPct=DEFAULT_HYPER_PCT,
                                  floorPct=DEFAULT_REGION_FLOOR_PCT,
-                                 asymmetryPct=DEFAULT_ASYMMETRY_PCT, robustReference=0.0,
+                                 asymmetryPct=DEFAULT_ASYMMETRY_PCT,
                                  focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
                                  minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
                                  focalHypo=True, minLowFrac=DEFAULT_MIN_LOW_FRAC_PCT,
                                  minRegionVoxels=DEFAULT_MIN_REGION_VOXELS,
                                  maskToBrain=True, islandPct=30.0, islandErode=2,
-                                 gradeStepPct=DEFAULT_GRADE_STEP_PCT):
+                                 gradeStepPct=DEFAULT_GRADE_STEP_PCT, fwhmMm=DEFAULT_FWHM_MM):
         """Exact-mask regional quantification (#2): pool each Amen region's precise
         AAL3 voxels from the warped atlas (no Box ROIs) and classify with the same
         bands/grading as quantifyRegions. Returns (rows, meta) in the SAME shape, so
         formatRegionReport / exportRegionTsv / the table render it unchanged.
 
-        Reference = the cerebellar MAX value passed in (supply the atlas-derived one
-        from cerebellarMaxFromAtlas, or a manual override). ATLAS-MODE focal test is
+        Reference = the shared 100% anchor passed in (cerebellar MAX by default, via
+        cerebellarMaxFromAtlas / manual override; or a whole-brain fallback) - the
+        SAME value the renders use, so the table matches the picture. ATLAS-MODE focal test is
         hot-FRACTION only: a flat hot-voxel COUNT over-fires on large atlas regions
         (a 500-voxel region trivially holds >3 hot voxels), so minHotVoxels is unused
         here. NOTE: aggregating fine parcels also dilutes focal hot spots - the known
@@ -2914,10 +3217,11 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         if arrFull.shape != lab.shape:
             raise ValueError("Atlas labelmap geometry does not match the volume - "
                              "resample the warped atlas onto the volume grid first.")
-        refval = float(cerebellarMax) if cerebellarMax and cerebellarMax > 0 else float(robustReference)
+        refval = float(reference)
         if not refval or refval <= 0:
             raise ValueError("Reference value unavailable - set the cerebellar max "
-                             "('Set reference from atlas cerebellum' or 'Manual reference').")
+                             "('Set reference from atlas cerebellum' or 'Manual reference'), "
+                             "or pick a whole-brain reference mode.")
         floor = refval * floorPct / 100.0
         hotThreshold = refval * hyperPct / 100.0
         lowThreshold = refval * hypoPct / 100.0     # = the surface-render hole cut
@@ -2930,6 +3234,8 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             brain = arrFull > floor
             arr = np.asarray(arrFull, dtype=float)
         usePeak = (metric == REGION_METRIC_PEAK)
+        sp = volumeNode.GetSpacing()
+        voxVolMm3 = float(sp[0] * sp[1] * sp[2])
 
         pools = {}
         for labelVal, key in atlasLabelToRegion().items():
@@ -2952,11 +3258,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             lowFrac = 100.0 * lowN / tissue.size
             lowMeanPct = (float(low.mean()) / refval * 100.0) if lowN else None
             pct = val / refval * 100.0
+            dEff = sphereEquivDiameterMm(int(tissue.size), voxVolMm3)
+            rc = sphereRecoveryCoefficient(dEff, fwhmMm)
             # atlas focal-hyper is fraction-only (a flat count over-fires on big parcels)
             cz = classifyRegion(pct, hyperPct, hypoPct, hotFrac, lowFrac, hotMeanPct,
                                 lowMeanPct, focalHyper, focalHypo, minHotFrac, minLowFrac,
                                 gradeStepPct, countFocal=False,
-                                nvox=int(tissue.size), minRegionVoxels=minRegionVoxels)
+                                nvox=int(tissue.size), minRegionVoxels=minRegionVoxels,
+                                dEffMm=dEff, fwhmMm=fwhmMm)
             name = base if side == "M" else "%s %s" % (side, base)
             exact = AMEN_REGIONS_BY_NAME.get(name)
             grpSchema = (exact or AMEN_REGIONS_BY_NAME.get("L " + base)
@@ -2969,6 +3278,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 hyperGrade=cz["hyperGrade"], hypoGrade=cz["hypoGrade"],
                 nvox=int(tissue.size), hotN=hotN, hotFrac=hotFrac, hotMeanPct=hotMeanPct,
                 lowN=lowN, lowFrac=lowFrac, lowMeanPct=lowMeanPct,
+                dEff=dEff, rc=rc, pveLimited=cz["pveLimited"],
                 asym=None, asymFlag=False))
 
         byBaseSide = {}
@@ -2992,13 +3302,14 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         subLow = brain & (arrFull < lowThreshold) & (arrFull > floor)
         nLowBrain = int(subLow.sum())
         nLowOut = int((subLow & (lab == 0)).sum())
-        meta = dict(refval=refval, reflabel="cerebellar max", floor=floor, metric=metric,
+        meta = dict(refval=refval, reflabel=reflabel, floor=floor, metric=metric,
                     hypoPct=hypoPct, hyperPct=hyperPct, asymmetryPct=asymmetryPct,
                     focalHyper=focalHyper, minHotVoxels=minHotVoxels, minHotFrac=minHotFrac,
                     focalHypo=focalHypo, minLowFrac=minLowFrac,
                     minRegionVoxels=minRegionVoxels,
                     hotThreshold=hotThreshold, lowThreshold=lowThreshold, masked=masked,
-                    gradeStepPct=gradeStepPct,
+                    gradeStepPct=gradeStepPct, fwhm=fwhmMm,
+                    nPveLimited=sum(1 for r in rows if r.get("pveLimited")),
                     nHypo=sum(1 for r in rows if r["cls"] in ("Hypoactive", "Mixed")),
                     nHyper=sum(1 for r in rows if r["cls"] in ("Hyperactive", "Mixed")),
                     nMixed=sum(1 for r in rows if r["cls"] == "Mixed"),
@@ -3013,21 +3324,24 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                     nRegions=len(rows))
         return rows, meta
 
-    def quantifyRegions(self, volumeNode, referenceRoiNode, cerebellarMax,
+    def quantifyRegions(self, volumeNode, referenceRoiNode, reference,
+                        reflabel="cerebellar max",
                         metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX,
                         hypoPct=DEFAULT_HYPO_PCT, hyperPct=DEFAULT_HYPER_PCT,
                         floorPct=DEFAULT_REGION_FLOOR_PCT,
-                        asymmetryPct=DEFAULT_ASYMMETRY_PCT, robustReference=0.0,
+                        asymmetryPct=DEFAULT_ASYMMETRY_PCT,
                         focalHyper=True, minHotVoxels=DEFAULT_MIN_HOT_VOXELS,
                         minHotFrac=DEFAULT_MIN_HOT_FRAC_PCT,
                         focalHypo=True, minLowFrac=DEFAULT_MIN_LOW_FRAC_PCT,
                         minRegionVoxels=DEFAULT_MIN_REGION_VOXELS,
                         maskToBrain=True, islandPct=30.0, islandErode=2,
-                        gradeStepPct=DEFAULT_GRADE_STEP_PCT):
+                        gradeStepPct=DEFAULT_GRADE_STEP_PCT, fwhmMm=DEFAULT_FWHM_MM):
         """Quantify every Markups ROI (except the cerebellum reference) against
         the cerebellar reference and classify hypo/normal/hyper. Returns
         (rows, meta). Each row dict: name, group, side, base, note, value, pct,
-        cls, focal, nvox, hotN, hotFrac, hotMeanPct, asym, asymFlag.
+        cls, focal, nvox, hotN, hotFrac, hotMeanPct, asym, asymFlag, plus dEff
+        (effective diameter, mm), rc (estimated partial-volume recovery coefficient
+        vs fwhmMm) and pveLimited (effective diameter < PVE_FWHM_MULT x FWHM).
 
         With maskToBrain on (default), stats are computed on the SAME largest-
         island brain mask the surface/active scans render from, so extracranial
@@ -3045,38 +3359,37 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         r2i = vtk.vtkMatrix4x4()
         volumeNode.GetRASToIJKMatrix(r2i)
 
-        # Floor is always a fraction of the cerebellar MAX (CSF/background cut).
-        floorBase = cerebellarMax if cerebellarMax and cerebellarMax > 0 else robustReference
-        floor = floorBase * floorPct / 100.0
+        # Floor is a fraction of the shared 100% reference (CSF/background cut).
+        floor = reference * floorPct / 100.0
 
         # Brain-mask the stats volume so only brain voxels are read (matches the
         # render). Work on a COPY - never mutate the source volume's array.
-        maskBase = cerebellarMax if cerebellarMax and cerebellarMax > 0 else robustReference
-        masked = bool(maskToBrain and maskBase and maskBase > 0)
+        masked = bool(maskToBrain and reference and reference > 0)
         if masked:
             brainMask = self._largestIslandMask(
-                volumeNode, maskBase * islandPct / 100.0, int(islandErode))
+                volumeNode, reference * islandPct / 100.0, int(islandErode))
             arr = np.array(slicer.util.arrayFromVolume(volumeNode), dtype=float)
             arr[~brainMask] = 0.0
         else:
             arr = slicer.util.arrayFromVolume(volumeNode)
 
         usePeak = (metric == REGION_METRIC_PEAK)
+        sp = volumeNode.GetSpacing()
+        voxVolMm3 = float(sp[0] * sp[1] * sp[2])
         if refMode == REGION_REF_MEAN:
             refSt = (self.regionRoiStats(referenceRoiNode, arr, r2i, floor)
                      if referenceRoiNode is not None else None)
             refval = refSt["mean"] if refSt else 0.0
             reflabel = "cerebellar mean"
         else:
-            refval = cerebellarMax if cerebellarMax and cerebellarMax > 0 else robustReference
-            reflabel = "cerebellar max"
+            refval = reference   # % of the shared anchor (cerebellar max by default)
         if not refval or refval <= 0:
-            raise ValueError("Reference value unavailable (set the cerebellar max, "
-                             "or select a cerebellum ROI for '%s')." % REGION_REF_MEAN)
+            raise ValueError("Reference value unavailable - set a cerebellar max / "
+                             "reference, or select a cerebellum ROI for '%s'." % REGION_REF_MEAN)
 
-        # "Hot" voxels are defined against the cerebellar MAX (the same anchor as
-        # the active-scan red voxels), so the table agrees with the render.
-        hotRef = cerebellarMax if cerebellarMax and cerebellarMax > 0 else refval
+        # "Hot"/"low" voxels are defined against the shared 100% reference (the same
+        # anchor as the active-scan red voxels), so the table agrees with the render.
+        hotRef = reference if reference and reference > 0 else refval
         hotThreshold = hotRef * hyperPct / 100.0
         lowThreshold = hotRef * hypoPct / 100.0     # = the surface-render hole cut
 
@@ -3098,12 +3411,15 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             hotMeanPct = (st["hotMean"] / refval * 100.0) if st["hotMean"] is not None else None
             lowFracPct = st["lowFrac"] * 100.0
             lowMeanPct = (st["lowMean"] / refval * 100.0) if st["lowMean"] is not None else None
+            dEff = sphereEquivDiameterMm(st["nvox"], voxVolMm3)
+            rc = sphereRecoveryCoefficient(dEff, fwhmMm)
             # ROI mode keeps the OR'd count-or-fraction hot trigger (countFocal=True).
             cz = classifyRegion(pct, hyperPct, hypoPct, hotFracPct, lowFracPct, hotMeanPct,
                                 lowMeanPct, focalHyper, focalHypo, minHotFrac, minLowFrac,
                                 gradeStepPct, countFocal=True, hotN=st["hotN"],
                                 minHotVoxels=minHotVoxels,
-                                nvox=st["nvox"], minRegionVoxels=minRegionVoxels)
+                                nvox=st["nvox"], minRegionVoxels=minRegionVoxels,
+                                dEffMm=dEff, fwhmMm=fwhmMm)
             schema = AMEN_REGIONS_BY_NAME.get(nm)
             rows.append(dict(
                 name=nm,
@@ -3116,6 +3432,7 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                 hyperGrade=cz["hyperGrade"], hypoGrade=cz["hypoGrade"],
                 nvox=st["nvox"], hotN=st["hotN"], hotFrac=hotFracPct, hotMeanPct=hotMeanPct,
                 lowN=st["lowN"], lowFrac=lowFracPct, lowMeanPct=lowMeanPct,
+                dEff=dEff, rc=rc, pveLimited=cz["pveLimited"],
                 asym=None, asymFlag=False))
 
         # L/R asymmetry for paired regions present on both sides (mean-based).
@@ -3141,7 +3458,8 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
                     focalHypo=focalHypo, minLowFrac=minLowFrac,
                     minRegionVoxels=minRegionVoxels,
                     hotThreshold=hotThreshold, lowThreshold=lowThreshold, masked=masked,
-                    gradeStepPct=gradeStepPct,
+                    gradeStepPct=gradeStepPct, fwhm=fwhmMm,
+                    nPveLimited=sum(1 for r in rows if r.get("pveLimited")),
                     nHypo=sum(1 for r in rows if r["cls"] in ("Hypoactive", "Mixed")),
                     nHyper=sum(1 for r in rows if r["cls"] in ("Hyperactive", "Mixed")),
                     nMixed=sum(1 for r in rows if r["cls"] == "Mixed"),
@@ -3172,20 +3490,24 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         metricCol = "Peak_counts" if meta["metric"] == REGION_METRIC_PEAK else "Mean_counts"
         header = ("Region\tGroup\tSide\t%s\tPct_of_%s\tHot_voxels\tHot_pct_of_ROI\tHot_mean_pct\t"
                   "Low_voxels\tLow_pct_of_ROI\tLow_mean_pct\t"
-                  "Classification\tGrade\tFocal_hot\tFocal_low\tLR_asymmetry_pct\tVoxels\n" % (
+                  "Classification\tGrade\tFocal_hot\tFocal_low\tLR_asymmetry_pct\tVoxels\t"
+                  "Eff_diameter_mm\tRecovery_coeff\tPVE_limited\n" % (
                       metricCol, meta["reflabel"].replace(" ", "_")))
 
         def fmt(row):
             asym = "" if row["asym"] is None else "%.1f" % row["asym"]
             hotMean = "" if row["hotMeanPct"] is None else "%.1f" % row["hotMeanPct"]
             lowMean = "" if row.get("lowMeanPct") is None else "%.1f" % row["lowMeanPct"]
-            return "%s\t%s\t%s\t%.1f\t%.1f\t%d\t%.1f\t%s\t%d\t%.1f\t%s\t%s\t%s\t%s\t%s\t%s\t%d\n" % (
+            return ("%s\t%s\t%s\t%.1f\t%.1f\t%d\t%.1f\t%s\t%d\t%.1f\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t"
+                    "%.1f\t%.3f\t%s\n") % (
                 row["name"], row["group"], row["side"], row["value"], row["pct"],
                 row["hotN"], row["hotFrac"], hotMean,
                 row.get("lowN", 0), row.get("lowFrac", 0.0), lowMean,
                 row["cls"], gradeLabel(row["grade"]),
                 "yes" if row["focal"] else "", "yes" if row.get("focalHypo") else "",
-                asym, row["nvox"])
+                asym, row["nvox"],
+                row.get("dEff", 0.0), row.get("rc", 1.0),
+                "yes" if row.get("pveLimited") else "")
 
         full = os.path.join(outputDir, "regional_all.tsv")
         with open(full, "w") as f:
@@ -3204,10 +3526,11 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
         valhdr = "PeakCts" if meta["metric"] == REGION_METRIC_PEAK else "MeanCts"
         lines = [
             "=== REGIONAL QUANTIFICATION (Amen-style) ===",
-            "Metric = region %s   Reference (100%%) = %.1f counts (%s)   Volume = %s" % (
+            "Metric = region %s   Reference (100%%) = %.1f counts (%s)   Volume = %s%s" % (
                 "peak" if meta["metric"] == REGION_METRIC_PEAK else "mean",
                 meta["refval"], meta["reflabel"],
-                "brain-masked (matches render)" if meta.get("masked") else "RAW (incl. extracranial)"),
+                "brain-masked (matches render)" if meta.get("masked") else "RAW (incl. extracranial)",
+                ("   SPECT FWHM = %.1f mm" % meta["fwhm"]) if meta.get("fwhm") else ""),
             "Hyperactive = MEAN > %.0f%% OR %sa focal HOT focus (>= %d hot vox OR >= %.0f%% "
             "of ROI; hot = >= %.0f%%).  Hypoactive = MEAN < %.0f%% OR %sa focal DENT (>= %.0f%% "
             "of ROI < %.0f%% - the surface-hole cut).  Mixed = both." % (
@@ -3220,9 +3543,13 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             "-4 below %.0f%%). For a Mixed region the larger deviation is shown." % (
                 meta["gradeStepPct"], meta["hyperPct"], meta["hypoPct"],
                 meta["hypoPct"] - 3 * meta["gradeStepPct"]),
-            "%-44s %8s  %6s  %11s  %11s   %-12s %5s %6s" % (
-                "Region", valhdr, "%Ref", "Hot%(vox)", "Low%(vox)", "Class", "Grade", "L-R%"),
-            "-" * 116,
+            "Recov = estimated partial-volume recovery coefficient (region effective diameter "
+            "vs FWHM); a region under %gx FWHM is flagged PVE-limited (⚠ after Recov), one under "
+            "%gx FWHM is Insufficient. RC is an ESTIMATE to gauge trust, not a correction." % (
+                PVE_FWHM_MULT, INSUFFICIENT_FWHM_MULT),
+            "%-44s %8s  %6s  %11s  %11s   %-12s %5s %6s %6s" % (
+                "Region", valhdr, "%Ref", "Hot%(vox)", "Low%(vox)", "Class", "Grade", "L-R%", "Recov"),
+            "-" * 124,
         ]
         for row in rows:
             asym = "" if row["asym"] is None else "%+.0f" % row["asym"]
@@ -3232,22 +3559,29 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             grd = gradeLabel(row["grade"]) if row["grade"] else ""
             hot = "%.1f%%(%d)" % (row["hotFrac"], row["hotN"])
             low = "%.1f%%(%d)" % (row.get("lowFrac", 0.0), row.get("lowN", 0))
-            lines.append("%-44s %8.1f  %5.1f%%  %11s  %11s   %-12s %5s %6s%s" % (
-                row["name"], row["value"], row["pct"], hot, low, clsTxt, grd, asym, mark))
+            rcv = ("%.2f" % row["rc"] if row.get("rc") is not None else "") + (
+                "⚠" if row.get("pveLimited") else "")
+            lines.append("%-44s %8.1f  %5.1f%%  %11s  %11s   %-12s %5s %6s%s %6s" % (
+                row["name"], row["value"], row["pct"], hot, low, clsTxt, grd, asym, mark, rcv))
         lines.append("-" * 116)
         gc = meta["gradeCounts"]
         hyperBreak = " / ".join("+%d:%d" % (g, gc[g]) for g in (1, 2, 3, 4) if gc[g])
         hypoBreak = " / ".join("%d:%d" % (g, gc[g]) for g in (-1, -2, -3, -4) if gc[g])
         smallNote = ""
         if meta.get("nSmall"):
-            smallNote = " %d region(s) < %d voxels marked Insufficient (too small to classify)." % (
-                meta["nSmall"], meta.get("minRegionVoxels", DEFAULT_MIN_REGION_VOXELS))
+            smallNote = " %d region(s) < %d voxels or < %gx FWHM marked Insufficient (too small to classify)." % (
+                meta["nSmall"], meta.get("minRegionVoxels", DEFAULT_MIN_REGION_VOXELS),
+                INSUFFICIENT_FWHM_MULT)
+        pveNote = ""
+        if meta.get("nPveLimited"):
+            pveNote = (" %d region(s) partial-volume-limited (effective Ø < %gx FWHM) - "
+                       "marked ⚠, read with caution." % (meta["nPveLimited"], PVE_FWHM_MULT))
         lines.append("%d region(s): %d hypoactive [%s], %d hyperactive [%s], %d mixed; "
-                     "focal hot %d / focal dent %d; %d L/R asymmetr%s >%.0f%% (marked *).%s" % (
+                     "focal hot %d / focal dent %d; %d L/R asymmetr%s >%.0f%% (marked *).%s%s" % (
                          meta["nRegions"], meta["nHypo"], hypoBreak or "-",
                          meta["nHyper"], hyperBreak or "-", meta.get("nMixed", 0),
                          meta["nFocal"], meta.get("nFocalHypo", 0), meta["nAsym"],
-                         "y" if meta["nAsym"] == 1 else "ies", meta["asymmetryPct"], smallNote))
+                         "y" if meta["nAsym"] == 1 else "ies", meta["asymmetryPct"], smallNote, pveNote))
         if meta.get("nLowBrain"):
             lines.append("QC: %.0f%% of sub-%.0f%% brain tissue (%d of %d voxels) falls OUTSIDE "
                          "every AAL3 parcel - surface dents at the rim that no region can capture."
@@ -3419,8 +3753,8 @@ class SPECTBrainRenderLogic(ScriptedLoadableModuleLogic):
             "Absolute count value behind each % of reference:",
             f"   45% (prognostic surface) = {0.45 * ref:.1f}",
             f"   55% (surface threshold)  = {0.55 * ref:.1f}",
-            f"   60% (hypo/normal cut)    = {0.60 * ref:.1f}",
-            f"   80% (active / hyper cut) = {0.80 * ref:.1f}",
+            f"   {DEFAULT_HYPO_PCT:.0f}% (hypo/normal cut)    = {DEFAULT_HYPO_PCT / 100.0 * ref:.1f}",
+            f"   {DEFAULT_HYPER_PCT:.0f}% (active / hyper cut) = {DEFAULT_HYPER_PCT / 100.0 * ref:.1f}",
             f"   90% (pink)               = {0.90 * ref:.1f}",
             f"  100% (white)              = {1.00 * ref:.1f}",
         ]
@@ -3450,11 +3784,13 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.test_FocalHyperactive()
         self.test_FocalHypo()
         self.test_SmallRegionGuard()
+        self.test_PveHelpers()
         self.test_QuantifyMasksExtracranial()
         self.test_OrdinalGrade()
         self.test_AtlasSeedAndReference()
         self.test_AtlasRegistrationAssets()
         self.test_AtlasColorTable()
+        self.test_AtlasNudge()
 
     def _makePhantom(self):
         """Ellipsoid 'brain' (~600), a cerebellum-like hot region posterior-inferior
@@ -3707,16 +4043,23 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         from collections import Counter
         groups = Counter(r["group"] for r in AMEN_REGIONS)
         self.assertEqual(groups["Frontal Lobe"], 14)    # 7 paired
-        self.assertEqual(groups["Cingulate Gyrus"], 10)  # 5 paired
+        self.assertEqual(groups["Cingulate Gyrus"], 5)   # 5 midline (pooled L+R)
         self.assertEqual(groups["Temporal Lobe"], 12)    # 6 paired
         self.assertEqual(groups["Parietal Lobe"], 6)     # 3 paired (incl. Precuneus / DMN)
         self.assertEqual(groups["Occipital Lobe"], 4)    # 2 paired
         self.assertEqual(groups["Subcortical"], 10)      # 5 paired (incl. Nucleus Accumbens)
         self.assertEqual(groups["Cerebellum"], 2)        # 1 paired
-        self.assertEqual(len(AMEN_REGIONS), 58)  # 29 base regions x L/R
-        # all regions paired L/R; names unique
-        self.assertTrue(all(r["side"] in ("L", "R") for r in AMEN_REGIONS))
+        self.assertEqual(len(AMEN_REGIONS), 53)  # 24 paired (x L/R) + 5 midline cingulate
+        # sides are L/R (paired) or M (midline); 29 base structures either way
+        self.assertTrue(all(r["side"] in ("L", "R", "M") for r in AMEN_REGIONS))
         self.assertEqual(len({r["base"] for r in AMEN_REGIONS}), 29)
+        # the five cingulate divisions are MIDLINE (pooled L+R); both AAL3 sides pool into one
+        cingBases = ["Anterior Cingulate - Dorsal", "Anterior Cingulate - Genu",
+                     "Anterior Cingulate - Ventral", "Middle Cingulate", "Posterior Cingulate"]
+        self.assertTrue(all(AMEN_REGIONS_BY_NAME[b]["side"] == "M" for b in cingBases))
+        self.assertNotIn("L Posterior Cingulate", AMEN_REGIONS_BY_NAME)
+        self.assertEqual(_atlasAmenOf("Cingulate_Post_L"), ("Posterior Cingulate", "M"))
+        self.assertEqual(_atlasAmenOf("Cingulate_Post_R"), ("Posterior Cingulate", "M"))
         self.assertIn("L Precuneus", AMEN_REGIONS_BY_NAME)  # DMN hub, its own region
         self.assertIn("L Nucleus Accumbens", AMEN_REGIONS_BY_NAME)  # ventral striatum, its own region
         self.assertIn("R Nucleus Accumbens", AMEN_REGIONS_BY_NAME)
@@ -3729,9 +4072,8 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertIn("R Dorsolateral PFC", AMEN_REGIONS_BY_NAME)
         self.assertIn("L Thalamus", AMEN_REGIONS_BY_NAME)
         self.assertIn("R Thalamus", AMEN_REGIONS_BY_NAME)
-        # clinical note carried through to both sides of the paired region
-        self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["L Anterior Cingulate - Ventral"]["note"])
-        self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["R Anterior Cingulate - Ventral"]["note"])
+        # clinical note carried on the (now midline) vACC region
+        self.assertIn("SSRI", AMEN_REGIONS_BY_NAME["Anterior Cingulate - Ventral"]["note"])
         print(f"TEST schema regions={len(AMEN_REGIONS)} bases=29 groups={dict(groups)}")
         self.delayDisplay("Region schema passed")
 
@@ -3743,8 +4085,8 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         logic = SPECTBrainRenderLogic()
         vol = self._makePhantom()
         n = logic.createRegionRoiScaffold(vol)
-        self.assertEqual(n, 58)
-        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 58)
+        self.assertEqual(n, 53)
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLMarkupsROINode")), 53)
 
         rows, meta = logic.quantifyRegions(vol, None, 870.0,
                                            metric=REGION_METRIC_MEAN, refMode=REGION_REF_MAX)
@@ -3938,13 +4280,49 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertGreaterEqual(big["nvox"], 20)
         self.assertEqual(big["cls"], "Hypoactive")   # 64 voxels, all < 55%
         self.assertEqual(meta["nSmall"], 1)
-        # guard OFF -> the tiny region is classified again (Hypoactive)
-        rows2, _ = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False, minRegionVoxels=0)
+        # PVE tooling (default 8 mm FWHM, 3 mm voxels): big is classified but its
+        # ~14.9 mm effective diameter is < 2x FWHM -> PVE-limited, low recovery est;
+        # the Insufficient tiny region is not also counted as PVE-limited.
+        self.assertEqual(meta["fwhm"], DEFAULT_FWHM_MM)
+        self.assertTrue(big["pveLimited"])
+        self.assertTrue(0.0 < big["rc"] < 0.9)
+        self.assertFalse(tiny["pveLimited"])
+        self.assertGreaterEqual(meta["nPveLimited"], 1)
+        # FWHM-aware guard: with the VOXEL floor off but FWHM on, the tiny region's
+        # ~7.7 mm effective diameter (< 1x FWHM) still marks it Insufficient.
+        rowsPhys, _ = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False, minRegionVoxels=0)
+        self.assertEqual({r["name"]: r for r in rowsPhys}["L Nucleus Accumbens"]["cls"],
+                         CLS_INSUFFICIENT)
+        # BOTH guards off (voxel floor 0 AND FWHM 0) -> the tiny region is classified again
+        rows2, _ = logic.quantifyRegions(vol, None, 870.0, maskToBrain=False,
+                                         minRegionVoxels=0, fwhmMm=0.0)
         self.assertEqual({r["name"]: r for r in rows2}["L Nucleus Accumbens"]["cls"], "Hypoactive")
-        print("TEST smallGuard tiny=%s(nvox=%d) big=%s(nvox=%d) nSmall=%d guardOff=%s" % (
-            tiny["cls"], tiny["nvox"], big["cls"], big["nvox"], meta["nSmall"],
+        print("TEST smallGuard tiny=%s(nvox=%d) big=%s(nvox=%d,rc=%.2f,pve=%s) nSmall=%d "
+              "nPve=%d physFloor=%s bothOff=%s" % (
+            tiny["cls"], tiny["nvox"], big["cls"], big["nvox"], big["rc"], big["pveLimited"],
+            meta["nSmall"], meta["nPveLimited"],
+            {r["name"]: r for r in rowsPhys}["L Nucleus Accumbens"]["cls"],
             {r["name"]: r for r in rows2}["L Nucleus Accumbens"]["cls"]))
         self.delayDisplay("Small-region guard passed")
+
+    def test_PveHelpers(self):
+        self.delayDisplay("Partial-volume helpers (recovery coeff + effective diameter)")
+        # sphere-equivalent diameter: closed form, and 0 for an empty region
+        self.assertAlmostEqual(sphereEquivDiameterMm(64, 27.0), 14.89, delta=0.05)
+        self.assertEqual(sphereEquivDiameterMm(0, 27.0), 0.0)
+        # recovery coefficient anchors: ~0.29 at 1x FWHM, ~0.86 at 2x, ~0.99 at 3x
+        self.assertAlmostEqual(sphereRecoveryCoefficient(8.0, 8.0), 0.291, delta=0.01)
+        self.assertAlmostEqual(sphereRecoveryCoefficient(16.0, 8.0), 0.864, delta=0.01)
+        self.assertAlmostEqual(sphereRecoveryCoefficient(24.0, 8.0), 0.994, delta=0.01)
+        self.assertLess(sphereRecoveryCoefficient(8.0, 8.0),
+                        sphereRecoveryCoefficient(16.0, 8.0))  # monotonic in size
+        # FWHM 0 (PVE disabled) or zero size -> RC 1.0, no penalty
+        self.assertEqual(sphereRecoveryCoefficient(10.0, 0.0), 1.0)
+        self.assertEqual(sphereRecoveryCoefficient(0.0, 8.0), 1.0)
+        print("TEST pveHelpers dEff(64,27)=%.2f RC@1x=%.3f RC@2x=%.3f RC@3x=%.3f" % (
+            sphereEquivDiameterMm(64, 27.0), sphereRecoveryCoefficient(8, 8),
+            sphereRecoveryCoefficient(16, 8), sphereRecoveryCoefficient(24, 8)))
+        self.delayDisplay("Partial-volume helpers passed")
 
     def test_QuantifyMasksExtracranial(self):
         self.delayDisplay("Brain mask excludes extracranial hot uptake")
@@ -4149,6 +4527,54 @@ class SPECTBrainRenderTest(ScriptedLoadableModuleTest):
         self.assertLess(cpt[1], front[1])   # cerebellum posterior to frontal pole (lower A)
         print("TEST landmarks n=%d cereb.A=%.0f<front.A=%.0f" % (len(labels), cpt[1], front[1]))
         self.delayDisplay("Atlas assets + QC + landmarks passed")
+
+    def test_AtlasNudge(self):
+        self.delayDisplay("Manual atlas nudge (transform -> harden -> NN regrid)")
+        import numpy as np, vtk
+        slicer.mrmlScene.Clear()
+        logic = SPECTBrainRenderLogic()
+        vol = self._makePhantom()
+        va = slicer.util.arrayFromVolume(vol)
+        lab = np.zeros_like(va, dtype="int16")
+        lab[20:28, 30:40, 30:40] = 2001    # a cortical parcel
+        lab[10:16, 16:24, 20:28] = 95      # a cerebellum label (95-120)
+        atlas = slicer.modules.volumes.logic().CreateAndAddLabelVolume(
+            slicer.mrmlScene, vol, "SynthAtlas")
+        slicer.util.updateVolumeFromArray(atlas, lab)
+
+        def centroid_i(node, label):
+            iis = np.where(slicer.util.arrayFromVolume(node) == label)[2]
+            return float(iis.mean()) if iis.size else None
+        i0 = centroid_i(atlas, 2001)
+
+        # begin: an interactive transform is attached to the atlas
+        xf = logic.beginAtlasNudge(atlas)
+        self.assertIsNotNone(atlas.GetParentTransformNode())
+        self.assertEqual(atlas.GetParentTransformNode().GetName(), NUDGE_TRANSFORM_NAME)
+        # simulate a drag: translate 6 mm along RAS-R (= 2 voxels at 3 mm spacing)
+        m = vtk.vtkMatrix4x4(); m.SetElement(0, 3, 6.0)
+        xf.SetMatrixTransformToParent(m)
+
+        # apply: harden + NN-regrid onto the SPECT grid; template-free QC (ncc None)
+        qc = logic.applyAtlasNudge(atlas, vol)
+        self.assertIsNone(atlas.GetParentTransformNode())          # transform consumed
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(NUDGE_TRANSFORM_NAME))
+        self.assertEqual(slicer.util.arrayFromVolume(atlas).shape, va.shape)  # voxel-aligned
+        self.assertIn(2001, np.unique(slicer.util.arrayFromVolume(atlas)))    # labels survive NN
+        self.assertIsNone(qc["ncc"])                               # no template -> NCC skipped
+        i1 = centroid_i(atlas, 2001)
+        self.assertIsNotNone(i1)
+        self.assertAlmostEqual(abs(i1 - i0), 2.0, delta=1.0)       # shifted ~2 voxels
+
+        # cancel path: begin, drag, cancel -> transform gone, nothing baked
+        xf2 = logic.beginAtlasNudge(atlas)
+        m2 = vtk.vtkMatrix4x4(); m2.SetElement(1, 3, 9.0); xf2.SetMatrixTransformToParent(m2)
+        logic.cancelAtlasNudge(atlas)
+        self.assertIsNone(atlas.GetParentTransformNode())
+        self.assertIsNone(slicer.mrmlScene.GetFirstNodeByName(NUDGE_TRANSFORM_NAME))
+        print("TEST atlasNudge shift_i %.1f->%.1f (~2 vox) qc_ncc=%s containment=%.0f%%" % (
+            i0, i1, qc["ncc"], qc["containment"]))
+        self.delayDisplay("Manual atlas nudge passed")
 
     def test_AtlasColorTable(self):
         """The warped atlas labelmap gets a NAMED color table so the Data Probe

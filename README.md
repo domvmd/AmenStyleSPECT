@@ -248,7 +248,7 @@ AmenStyleSPECT/
       Atlas/SPECT_HMPAO_template.nii.gz  MNI HMPAO perfusion template (from SPM)
 ```
 
-**Version:** 0.8.0 (open-source, GPL v3). Aligns the grading and taxonomy to the published Amen
+**Version:** 0.9.0 (open-source, GPL v3). Aligns the grading and taxonomy to the published Amen
 reading convention: the ordinal grade is now the **20-step / 5 %-per-color scale** (bands
 hypo < 55 %, normal 55–85 %, hot ≥ 85 %), the regional table's `% Ref` cell is tinted with the
 **Amen hot color LUT**, the **nucleus accumbens** is restored as its own region (**58 regions /
